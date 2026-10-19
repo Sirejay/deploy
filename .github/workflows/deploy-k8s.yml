@@ -137,6 +137,10 @@ jobs:
             type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend-migrate
 
+      # The frontend image is environment-agnostic: VITE_* values are no longer
+      # baked in at build time. Runtime configuration is injected via env vars
+      # (see frontend/Dockerfile entrypoint, which renders /config.js from
+      # window.__APP_CONFIG__) and supplied by the k8s manifests at deploy time.
       - name: Build and push frontend image
         id: build-frontend
         uses: docker/build-push-action@v7
@@ -332,6 +336,21 @@ jobs:
             "frontend=${PREFIX}/frontend:${TAG}"
           kubectl kustomize . | grep -E '^\s+image:'
 
+      # Runtime configuration for the frontend image. These env vars are read
+      # by the container entrypoint at start to render /config.js, so the same
+      # image can be promoted across environments without a rebuild.
+      - name: Configure frontend runtime env
+        if: steps.config.outputs.ready == 'true'
+        working-directory: ./k8s
+        env:
+          FRONTEND_API_URL: ${{ vars.FRONTEND_API_URL || '/api' }}
+          FRONTEND_NETWORK: ${{ vars.STELLAR_NETWORK || 'testnet' }}
+        run: |
+          kubectl -n synapsvault create configmap frontend-runtime-config \
+            --from-literal=API_URL="$FRONTEND_API_URL" \
+            --from-literal=NETWORK="$FRONTEND_NETWORK" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
       - name: Apply manifests
         id: apply
         if: steps.config.outputs.ready == 'true'
@@ -339,6 +358,7 @@ jobs:
           kubectl apply -k k8s/overlays/production
           kubectl -n synapsvault delete job backend-migrate --ignore-not-found
           kubectl apply -k k8s/
+          kubectl -n synapsvault rollout restart deployment/frontend
           # Track which deployments have been rolled out so a failure can be
           # rolled back precisely. Each successful rollout is recorded.
           : > "$RUNNER_TEMP/rolled_out"

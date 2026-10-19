@@ -10,6 +10,12 @@
 ARG NODE_VERSION=22
 # The backend's dependency tree has unresolved peer conflicts (e.g.
 # x402-stellar wants @stellar/stellar-sdk@^12 while the app uses ^15), so npm
+# needs --legacy-peer-deps until that is fixed upstream. Override with
+# --build-arg NPM_FLAGS= once it is.
+#
+# TODO(#102): drop --legacy-peer-deps once the upstream peer conflict is
+# resolved. Tracked upstream at:
+#   https://github.com/SynapsVault/backend/issues (x402-stellar vs stellar-sdk)
 # needs --legacy-peer-deps until that is fixed upstream
 # (tracked in https://github.com/SynapsVault/backend/issues). Override with
 # --build-arg NPM_FLAGS= once the upstream peer dependency issue is resolved.
@@ -65,8 +71,22 @@ RUN mkdir -p node_modules/@synapsvault && \
 RUN npm run build && test -f dist/index.js
 
 # ---------- Target: migrate ----------
-FROM build AS migrate
+# Slim image: only drizzle-kit, the drizzle config and the migrations are
+# needed to run `drizzle-kit migrate`. Avoids shipping the full build stage
+# (dev deps, sources, compilers) in the init container.
+FROM node:${NODE_VERSION}-alpine AS migrate
+ARG NPM_FLAGS
+WORKDIR /app
+
 ENV NODE_ENV=production
+
+# Install drizzle-kit standalone (no app dependency tree required).
+RUN npm install --no-audit --no-fund --ignore-scripts ${NPM_FLAGS} drizzle-kit
+
+# Only the config and migrations are required at runtime.
+COPY drizzle.config.ts ./drizzle.config.ts
+COPY drizzle ./drizzle
+
 USER node
 CMD ["npx", "--no-install", "drizzle-kit", "migrate"]
 
