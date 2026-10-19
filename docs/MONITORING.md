@@ -20,6 +20,7 @@ All configuration referenced here lives in the [`monitoring/`](../monitoring) di
   - [Email](#email)
   - [Slack](#slack)
 - [6. Verify the setup](#6-verify-the-setup)
+- [Runbooks](#runbooks)
 - [Required metrics](#required-metrics)
 - [Troubleshooting](#troubleshooting)
 
@@ -207,6 +208,7 @@ Alert rules are defined in [`monitoring/alert-rules.yml`](../monitoring/alert-ru
 
 ## 5. Configure Alertmanager notification channels
 
+Alertmanager routing and receivers are configured in [`monitoring/alertmanager.yml`](../monitoring/alertmanager.yml). The examples below show how to add email and Slack receivers. Replace placeholders with your real credentials and keep secrets out of version control.
 Alertmanager routing and receivers are configured in [`monitoring/alertmanager.yml`](../monitoring/alertmanager.yml). The examples below show how to add email and Slack receivers. Replace placeholders with your own values and keep secrets out of version control.
 
 ### Email
@@ -215,6 +217,11 @@ Alertmanager routing and receivers are configured in [`monitoring/alertmanager.y
 receivers:
   - name: email
     email_configs:
+      - to: oncall@example.com
+        from: alerts@example.com
+        smarthost: smtp.example.com:587
+        auth_username: alerts@example.com
+        auth_password_file: /etc/alertmanager/smtp_password
       - to: alerts@example.com
         from: alertmanager@example.com
         smarthost: smtp.example.com:587
@@ -231,6 +238,31 @@ receivers:
   - name: slack
     slack_configs:
       - api_url_file: /etc/alertmanager/slack_webhook_url
+        channel: '#alerts'
+        send_resolved: true
+```
+
+Mount the referenced secret files into the Alertmanager container and keep them out of version control.
+
+## 6. Verify the setup
+
+1. Confirm Prometheus targets are up: **Prometheus → Status → Targets**.
+2. Confirm rules are loaded: **Prometheus → Status → Rules**.
+3. Trigger a test alert (e.g. temporarily lower a threshold) and confirm it reaches Alertmanager and the configured notification channel.
+4. Confirm the alert resolves and a resolved notification is delivered (if `send_resolved` is enabled).
+
+## Runbooks
+
+Every alert in [`monitoring/alert-rules.yml`](../monitoring/alert-rules.yml) links to an operational runbook via its `runbook_url` annotation. Runbooks live in [`docs/runbooks/`](./runbooks) — see the [runbook index](./runbooks/README.md) for the full list.
+
+When you add or rename an alert, add a matching runbook under `docs/runbooks/` and point the alert's `runbook_url` at it.
+
+## Troubleshooting
+
+- **No metrics in Prometheus:** check the scrape target, network reachability, and that the backend `/metrics` endpoint responds.
+- **Rules not loading:** validate the YAML and confirm the rule file is mounted at the path in `rule_files`.
+- **Alerts not delivered:** check Alertmanager logs and confirm receiver credentials/secret files are correct.
+- **Dashboard empty:** confirm the Grafana data source points at the correct Prometheus instance.
         channel: "#alerts"
         send_resolved: true
 ```
