@@ -9,8 +9,10 @@ namespace: synapsvault
 resources:
   - namespace.yaml
   - configmap.yaml
+  - backend-serviceaccount.yaml
   - backend-deployment.yaml
   - backend-service.yaml
+  - frontend-serviceaccount.yaml
   - frontend-deployment.yaml
   - ingress.yaml
 

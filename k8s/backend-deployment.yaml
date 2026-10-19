@@ -19,6 +19,8 @@ spec:
       labels:
         app: backend
     spec:
+      serviceAccountName: backend
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
