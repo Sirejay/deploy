@@ -4,93 +4,126 @@ on:
   workflow_dispatch:
     inputs:
       network:
-        description: 'Network to deploy contracts to'
+        description: 'Stellar network to deploy to'
         required: true
         default: 'testnet'
         type: choice
         options:
           - testnet
           - mainnet
-      contracts_ref:
-        description: 'Git ref of SynapsVault/contracts to build'
-        required: true
-        default: 'main'
-        type: string
-      dry_run:
-        description: 'Run pre-flight checks only (no transactions)'
+      update_configmap:
+        description: 'Open a PR updating the K8s ConfigMap with the new contract IDs'
         required: false
         default: false
         type: boolean
 
 permissions:
-  contents: read
-
-concurrency:
-  group: deploy-contracts-${{ inputs.network }}
-  cancel-in-progress: false
+  contents: write
+  pull-requests: write
 
 jobs:
   deploy:
+    name: Deploy contracts
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    # Mainnet deployments require a manual approval on this environment.
-    environment: ${{ inputs.network == 'mainnet' && 'mainnet-approval' || 'testnet' }}
+    outputs:
+      contract_ids: ${{ steps.ids.outputs.contract_ids }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Checkout contracts
-        uses: actions/checkout@v7
-        with:
-          repository: SynapsVault/contracts
-          ref: ${{ inputs.contracts_ref }}
-          path: contracts
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version-file: .nvmrc
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Install Rust + wasm32 target
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+      - name: Cache cargo
+        uses: actions/cache@v4
         with:
-          workspaces: contracts
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build contracts
-        working-directory: contracts
-        run: |
-          cargo build --target wasm32-unknown-unknown --release --workspace
-          ls -lh target/wasm32-unknown-unknown/release/*.wasm
+        run: cargo build --release --target wasm32-unknown-unknown
 
       - name: Deploy contracts
+        id: deploy
         env:
+          STELLAR_SECRET_KEY: ${{ secrets.STELLAR_SECRET_KEY }}
           NETWORK: ${{ inputs.network }}
-          STELLAR_SECRET_KEY: ${{ secrets.DEPLOYER_SECRET_KEY }}
-          # Optional for testnet (defaults to the public RPC); required for mainnet.
-          SOROBAN_RPC_URL: ${{ inputs.network == 'mainnet' && secrets.MAINNET_RPC_URL || secrets.TESTNET_RPC_URL }}
-          # Optional: admin passed to init(); defaults to the deployer.
-          ADMIN_PUBLIC_KEY: ${{ vars.ADMIN_PUBLIC_KEY }}
-          CONTRACTS_WASM_DIR: ${{ github.workspace }}/contracts/target/wasm32-unknown-unknown/release
-          DRY_RUN: ${{ inputs.dry_run }}
+        run: ./scripts/deploy-contracts.sh
+
+      - name: Collect contract IDs
+        id: ids
         run: |
-          args=(--yes)
-          if [[ "$DRY_RUN" == "true" ]]; then args+=(--dry-run); fi
-          npm run deploy:contracts -- "${args[@]}"
+          if [ -f contract-ids.json ]; then
+            echo "contract_ids=$(jq -c . contract-ids.json)" >> "$GITHUB_OUTPUT"
+          else
+            echo "contract_ids={}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Upload contract IDs artifact
-        if: ${{ !inputs.dry_run }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
-          name: contract-ids-${{ inputs.network }}-${{ github.run_id }}
-          path: contract-ids.env
-          if-no-files-found: error
-          retention-days: 90
+          name: contract-ids-${{ inputs.network }}
+          path: contract-ids.json
+          if-no-files-found: warn
+
+  update-configmap:
+    name: Open ConfigMap update PR
+    needs: deploy
+    if: ${{ inputs.update_configmap }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update ConfigMap with new contract IDs
+        env:
+          CONTRACT_IDS: ${{ needs.deploy.outputs.contract_ids }}
+          NETWORK: ${{ inputs.network }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CONTRACT_IDS:-}" ] || [ "$CONTRACT_IDS" = "{}" ]; then
+            echo "No contract IDs produced; nothing to update."
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json, os, re
+
+          ids = json.loads(os.environ["CONTRACT_IDS"])
+          path = "k8s/configmap.yaml"
+          with open(path) as f:
+              text = f.read()
+
+          for key, value in ids.items():
+              # Map contract name -> ConfigMap key, e.g. "vault" -> "VAULT_CONTRACT_ID".
+              cm_key = re.sub(r"[^A-Za-z0-9]+", "_", key).upper() + "_CONTRACT_ID"
+              pattern = re.compile(rf"^(\s*{re.escape(cm_key)}:\s*).*$", re.MULTILINE)
+              if pattern.search(text):
+                  text = pattern.sub(lambda m: m.group(1) + f'"{value}"', text)
+              else:
+                  text = text.rstrip("\n") + f'\n  {cm_key}: "{value}"\n'
+
+          with open(path, "w") as f:
+              f.write(text)
+          PY
+
+      - name: Open pull request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: 'chore: update contract IDs in K8s ConfigMap (${{ inputs.network }})'
+          title: 'chore: update contract IDs in K8s ConfigMap (${{ inputs.network }})'
+          body: |
+            Automated update of `k8s/configmap.yaml` with the contract IDs
+            produced by the `deploy-contracts.yml` workflow run for
+            `${{ inputs.network }}`.
+
+            Contract IDs: `${{ needs.deploy.outputs.contract_ids }}`
+          branch: chore/update-contract-ids-${{ inputs.network }}
+          delete-branch: true
+          add-paths: |
+            k8s/configmap.yaml

@@ -17,10 +17,13 @@ concurrency:
 env:
   ACTIONLINT_VERSION: '1.7.7'
   KUBECONFORM_VERSION: '0.6.7'
+  KUBE_LINTER_VERSION: '0.7.1'
   PROMETHEUS_VERSION: '2.53.2'
   ALERTMANAGER_VERSION: '0.27.0'
   LYCHEE_VERSION: '0.15.1'
   GITLEAKS_VERSION: '8.18.4'
+  TRIVY_VERSION: '0.55.2'
+  HADOLINT_VERSION: '2.12.0'
 
 jobs:
   workflows:
@@ -73,6 +76,23 @@ jobs:
           shellcheck scripts/*.sh
       - name: Check bash syntax
         run: for f in scripts/*.sh; do bash -n "$f"; done
+      - name: End-to-end backup.sh and restore.sh round-trip check
+        run: |
+          out_dir="$(mktemp -d)"
+          work_dir="$(mktemp -d)"
+          BACKUP_SKIP_DB=1 \
+          BACKUP_SKIP_CONTRACTS=1 \
+          BACKUP_SKIP_UPLOAD=1 \
+          BACKUP_CLEANUP_WORK_DIR=0 \
+          BACKUP_WORK_DIR="${work_dir}" \
+          BACKUP_ENCRYPTION_METHOD=gpg \
+          BACKUP_ENCRYPTION_KEY="ci-e2e-passphrase" \
+          BACKUP_OUTPUT_DIR="${out_dir}" \
+          bash scripts/backup.sh
+          test -f "${out_dir}/manifest.json"
+          python3 -m json.tool "${out_dir}/manifest.json" > /dev/null
+          bash scripts/restore.sh --help > /dev/null
+          rm -rf "${out_dir}" "${work_dir}"
 
   node:
     name: Node scripts and tests
@@ -104,10 +124,16 @@ jobs:
         run: |
           curl -sSfL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
             | tar -xz -C /usr/local/bin kubeconform
+      - name: Install kube-linter
+        run: |
+          curl -sSfL "https://github.com/stackrox/kube-linter/releases/download/v${KUBE_LINTER_VERSION}/kube-linter-linux.tar.gz" \
+            | tar -xz -C /usr/local/bin kube-linter
       - name: Render kustomization
         run: kubectl kustomize k8s/ > rendered.yaml
       - name: Validate rendered manifests
         run: kubeconform -strict -summary rendered.yaml
+      - name: Lint rendered manifests (policy checks)
+        run: kube-linter lint rendered.yaml
       - name: Validate secret template
         run: kubeconform -strict -summary k8s/secrets.yaml
 
@@ -181,6 +207,20 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose down -v
+  hadolint:
+    name: Lint Dockerfiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install hadolint
+        run: |
+          curl -sSfL "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-x86_64" \
+            -o /usr/local/bin/hadolint
+          chmod +x /usr/local/bin/hadolint
+      - name: Run hadolint
+        run: |
+          hadolint --version
+          hadolint backend/Dockerfile frontend/Dockerfile
 
   docker:
     name: Build images
@@ -200,10 +240,19 @@ jobs:
             target: runtime
     steps:
       - uses: actions/checkout@v7
+      - name: Load pinned app refs
+        id: refs
+        run: |
+          set -a
+          . ./.github/workflows/app-versions.env
+          set +a
+          echo "backend=${BACKEND_REF}" >> "$GITHUB_OUTPUT"
+          echo "frontend=${FRONTEND_REF}" >> "$GITHUB_OUTPUT"
       - name: Checkout application source
         uses: actions/checkout@v7
         with:
           repository: ${{ matrix.repo }}
+          ref: ${{ matrix.name == 'frontend' && steps.refs.outputs.frontend || steps.refs.outputs.backend }}
           path: src
       - uses: docker/setup-buildx-action@v4
       - name: Build ${{ matrix.name }}
@@ -213,5 +262,65 @@ jobs:
           file: ./${{ matrix.name == 'frontend' && 'frontend' || 'backend' }}/Dockerfile
           target: ${{ matrix.target }}
           push: false
+          load: true
+          tags: synapsvault/${{ matrix.name }}:ci
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+      - name: Install Trivy
+        run: |
+          curl -sSfL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            | tar -xz -C /usr/local/bin trivy
+      - name: Scan ${{ matrix.name }} for vulnerabilities
+        # Fail the build on any CRITICAL CVE and emit SARIF for code scanning.
+        run: |
+          trivy image \
+            --severity CRITICAL \
+            --exit-code 1 \
+            --ignore-unfixed \
+            --format sarif \
+            --output trivy-${{ matrix.name }}.sarif \
+            synapsvault/${{ matrix.name }}:ci
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.name }}.sarif
+          category: trivy-${{ matrix.name }}
+
+  docker-main:
+    name: Build images against app main (optional)
+    runs-on: ubuntu-latest
+    # Optional job: exercises the app repos' moving `main` without gating PRs.
+    continue-on-error: true
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: backend
+            repo: SynapsVault/backend
+            target: runtime
+          - name: backend-migrate
+            repo: SynapsVault/backend
+            target: migrate
+          - name: frontend
+            repo: SynapsVault/frontend
+            target: runtime
+    steps:
+      - uses: actions/checkout@v7
+      - name: Checkout application source (main)
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ matrix.repo }}
+          ref: main
+          path: src
+      - uses: docker/setup-buildx-action@v4
+      - name: Build ${{ matrix.name }}
+        uses: docker/build-push-action@v7
+        with:
+          context: ./src
+          file: ./${{ matrix.name == 'frontend' && 'frontend' || 'backend' }}/Dockerfile
+          target: ${{ matrix.target }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.name }}-main
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}-main

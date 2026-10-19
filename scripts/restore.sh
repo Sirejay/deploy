@@ -14,20 +14,33 @@
 #                          from the backup came back, then drop it
 #   --work-dir <dir>       Working directory for downloads (default: mktemp -d)
 #   --keep-work-dir        Do not delete the working directory on exit
+#   --post-restore-sql <f> Optional SQL script to run against Postgres after
+#                          restoring (aliases $CONTRACT_STATE_FILE). Note: this
+#                          is a PostgreSQL .sql script, NOT the on-chain JSON
+#                          snapshots under contracts/ in the backup archive.
+#   --skip-contract-state  Do not apply CONTRACT_STATE_FILE / --post-restore-sql
 #   --skip-contract-state  Do not re-apply CONTRACT_STATE_FILE after restore
+#   -y, --yes              Skip interactive confirmation when restoring over a
+#                          non-throwaway target database
 #   -h, --help             Show this help
 #
 # Environment (same names as backup.sh; legacy names in parentheses):
+#   BACKUP_STORAGE_PROVIDER          s3 (default) or supabase
 #   BACKUP_STORAGE_BUCKET            Bucket name (BACKUP_BUCKET) - required
 #   BACKUP_STORAGE_ENDPOINT          S3-compatible endpoint URL (BACKUP_ENDPOINT)
 #   BACKUP_STORAGE_PREFIX            Key prefix, default "backups" (BACKUP_PREFIX)
 #   BACKUP_STORAGE_REGION            Region, default us-east-1 (AWS_DEFAULT_REGION)
 #   BACKUP_STORAGE_ACCESS_KEY_ID     Credentials (AWS_ACCESS_KEY_ID)
 #   BACKUP_STORAGE_SECRET_ACCESS_KEY Credentials (AWS_SECRET_ACCESS_KEY)
+#   BACKUP_STORAGE_SUPABASE_URL      Supabase project URL (when provider=supabase)
+#   BACKUP_STORAGE_SUPABASE_SERVICE_KEY Supabase service role key (when provider=supabase)
 #   BACKUP_ENCRYPTION_KEY            gpg passphrase used by backup.sh
 #   BACKUP_AGE_IDENTITY_FILE         age identity file, for age-encrypted backups
 #   DATABASE_URL                     Default target database connection string
-#   CONTRACT_STATE_FILE              Optional SQL file to apply after restore
+#   CONTRACT_STATE_FILE              Optional post-restore PostgreSQL .sql file
+#                                    (e.g. to update contract ID rows in DB;
+#                                    for repointing env/ConfigMap contract IDs,
+#                                    use scripts/rollback-contracts.cjs instead)
 #
 # Exit codes:
 #   0  success
@@ -51,7 +64,8 @@ die() {
 }
 
 usage() {
-  sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 # ---------------------------------------------------------------------------
@@ -60,9 +74,11 @@ usage() {
 BACKUP_NAME=""
 DATABASE_URL_ARG=""
 VERIFY_ONLY="false"
+ASSUME_YES="false"
 WORK_DIR=""
 KEEP_WORK_DIR="false"
 SKIP_CONTRACT_STATE="false"
+POST_RESTORE_SQL_ARG=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -80,6 +96,10 @@ while [[ $# -gt 0 ]]; do
       VERIFY_ONLY="true"
       shift
       ;;
+    -y|--yes)
+      ASSUME_YES="true"
+      shift
+      ;;
     --work-dir)
       [[ $# -ge 2 ]] || die 1 "--work-dir requires a value"
       WORK_DIR="$2"
@@ -88,6 +108,11 @@ while [[ $# -gt 0 ]]; do
     --keep-work-dir)
       KEEP_WORK_DIR="true"
       shift
+      ;;
+    --post-restore-sql)
+      [[ $# -ge 2 ]] || die 1 "--post-restore-sql requires a path to a .sql file"
+      POST_RESTORE_SQL_ARG="$2"
+      shift 2
       ;;
     --skip-contract-state)
       SKIP_CONTRACT_STATE="true"
@@ -110,6 +135,7 @@ BACKUP_NAME="${BACKUP_NAME%.tar.gz.enc}"
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+STORAGE_PROVIDER="${BACKUP_STORAGE_PROVIDER:-s3}"
 BUCKET="${BACKUP_STORAGE_BUCKET:-${BACKUP_BUCKET:-}}"
 ENDPOINT="${BACKUP_STORAGE_ENDPOINT:-${BACKUP_ENDPOINT:-}}"
 PREFIX="${BACKUP_STORAGE_PREFIX:-${BACKUP_PREFIX:-backups}}"
@@ -117,6 +143,8 @@ PREFIX="${PREFIX%/}"
 REGION="${BACKUP_STORAGE_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
 export AWS_ACCESS_KEY_ID="${BACKUP_STORAGE_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
 export AWS_SECRET_ACCESS_KEY="${BACKUP_STORAGE_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
+SUPABASE_URL="${BACKUP_STORAGE_SUPABASE_URL:-}"
+SUPABASE_SERVICE_KEY="${BACKUP_STORAGE_SUPABASE_SERVICE_KEY:-}"
 BACKUP_ENCRYPTION_KEY="${BACKUP_ENCRYPTION_KEY:-}"
 BACKUP_AGE_IDENTITY_FILE="${BACKUP_AGE_IDENTITY_FILE:-}"
 CONTRACT_STATE_FILE="${CONTRACT_STATE_FILE:-}"
@@ -126,9 +154,23 @@ TARGET_DATABASE_URL="${DATABASE_URL_ARG:-${DATABASE_URL:-}}"
 [[ -n "$BUCKET" ]] || die 1 "BACKUP_STORAGE_BUCKET is not set"
 [[ -n "$TARGET_DATABASE_URL" ]] || die 1 "target database URL is not set (use --database-url or DATABASE_URL)"
 
-for tool in aws psql gzip tar sha256sum; do
+for tool in psql gzip tar sha256sum; do
   command -v "$tool" >/dev/null 2>&1 || die 1 "required tool not found: $tool"
 done
+
+case "$STORAGE_PROVIDER" in
+  s3)
+    command -v aws >/dev/null 2>&1 || die 1 "required tool not found: aws"
+    ;;
+  supabase)
+    command -v curl >/dev/null 2>&1 || die 1 "required tool not found: curl"
+    [[ -n "$SUPABASE_URL" && -n "$SUPABASE_SERVICE_KEY" ]] || \
+      die 1 "Supabase storage requires BACKUP_STORAGE_SUPABASE_URL and BACKUP_STORAGE_SUPABASE_SERVICE_KEY"
+    ;;
+  *)
+    die 1 "unsupported BACKUP_STORAGE_PROVIDER: $STORAGE_PROVIDER (expected s3 or supabase)"
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Working directory
@@ -167,19 +209,52 @@ fi
 
 download_object() {
   local key="$1" dest="$2"
-  log "downloading s3://$BUCKET/$key"
-  aws "${AWS_ARGS[@]}" s3 cp "s3://$BUCKET/$key" "$dest" --only-show-errors \
-    || die 2 "failed to download $key"
+  case "$STORAGE_PROVIDER" in
+    s3)
+      log "downloading s3://$BUCKET/$key"
+      aws "${AWS_ARGS[@]}" s3 cp "s3://$BUCKET/$key" "$dest" --only-show-errors \
+        || die 2 "failed to download $key"
+      ;;
+    supabase)
+      log "downloading supabase://$BUCKET/$key"
+      local url="${SUPABASE_URL%/}/storage/v1/object/${BUCKET}/${key}"
+      curl -fsS \
+        -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
+        --max-time "${BACKUP_DOWNLOAD_TIMEOUT:-300}" \
+        -o "$dest" \
+        "$url" \
+        || die 2 "failed to download $key from Supabase Storage"
+      ;;
+  esac
 }
 
 latest_backup_name() {
   # Backup names embed a UTC timestamp, so lexical order is chronological.
-  aws "${AWS_ARGS[@]}" s3 ls "s3://$BUCKET/$PREFIX/" \
-    | awk '{print $4}' \
-    | grep -E '\.manifest\.json$' \
-    | sort \
-    | tail -n 1 \
-    | sed 's/\.manifest\.json$//'
+  case "$STORAGE_PROVIDER" in
+    s3)
+      aws "${AWS_ARGS[@]}" s3 ls "s3://$BUCKET/$PREFIX/" \
+        | awk '{print $4}' \
+        | grep -E '\.manifest\.json$' \
+        | sort \
+        | tail -n 1 \
+        | sed 's/\.manifest\.json$//'
+      ;;
+    supabase)
+      local list_url="${SUPABASE_URL%/}/storage/v1/object/list/${BUCKET}"
+      local body
+      body="$(printf '{"prefix":"%s","limit":1000,"sortBy":{"column":"name","order":"asc"}}' "$PREFIX")"
+      curl -fsS \
+        -X POST \
+        -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
+        -H "Content-Type: application/json" \
+        --data "$body" \
+        "$list_url" \
+        | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+\.manifest\.json"' \
+        | sed -E 's/.*"([^"]+)\.manifest\.json"/\1/' \
+        | sort \
+        | tail -n 1
+      ;;
+  esac
 }
 
 # Read a string field from the manifest written by backup.sh. The manifest has
@@ -204,7 +279,7 @@ with_database() {
 # ---------------------------------------------------------------------------
 if [[ -z "$BACKUP_NAME" ]]; then
   BACKUP_NAME="$(latest_backup_name || true)"
-  [[ -n "$BACKUP_NAME" ]] || die 2 "no backups found under s3://$BUCKET/$PREFIX/"
+  [[ -n "$BACKUP_NAME" ]] || die 2 "no backups found under ${STORAGE_PROVIDER}://$BUCKET/$PREFIX/"
   log "no --backup given; using newest backup: $BACKUP_NAME"
 fi
 
@@ -289,16 +364,20 @@ restore_into() {
 apply_contract_state() {
   local url="$1"
   if [[ "$SKIP_CONTRACT_STATE" == "true" ]]; then
-    log "skipping contract state re-application (--skip-contract-state)"
+    log "skipping post-restore SQL application (--skip-contract-state)"
     return 0
   fi
-  if [[ -z "$CONTRACT_STATE_FILE" ]]; then
-    log "no CONTRACT_STATE_FILE configured; skipping contract state re-application"
+  local sql_file="${POST_RESTORE_SQL_ARG:-${CONTRACT_STATE_FILE:-}}"
+  if [[ -z "$sql_file" ]]; then
+    log "no CONTRACT_STATE_FILE / --post-restore-sql configured; skipping post-restore SQL"
     return 0
   fi
-  [[ -f "$CONTRACT_STATE_FILE" ]] || die 4 "contract state file not found: $CONTRACT_STATE_FILE"
-  log "re-applying contract state from $CONTRACT_STATE_FILE"
-  psql_exec "$url" -f "$CONTRACT_STATE_FILE" || die 4 "failed to re-apply contract state"
+  [[ -f "$sql_file" ]] || die 4 "post-restore SQL file not found: $sql_file"
+  if [[ "$sql_file" == *.json ]]; then
+    die 1 "CONTRACT_STATE_FILE ($sql_file) must be a PostgreSQL .sql script, not a JSON contract snapshot (use scripts/rollback-contracts.cjs to repoint on-chain contract IDs)"
+  fi
+  log "applying post-restore SQL from $sql_file"
+  psql_exec "$url" -f "$sql_file" || die 4 "failed to apply post-restore SQL from $sql_file"
 }
 
 # ---------------------------------------------------------------------------
@@ -363,12 +442,29 @@ verify_restore() {
   log "verification passed"
 }
 
+confirm_restore() {
+  if [[ "$ASSUME_YES" == "true" ]]; then
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    die 1 "refusing to restore over a non-throwaway database non-interactively without --yes"
+  fi
+  log "WARNING: about to restore backup '$BACKUP_NAME' over the target database (DROP ... IF EXISTS)."
+  printf 'Type "restore" to confirm: ' >&2
+  local answer=""
+  read -r answer || answer=""
+  if [[ "$answer" != "restore" ]]; then
+    die 1 "restore aborted by user"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 if [[ "$VERIFY_ONLY" == "true" ]]; then
   verify_restore "$TARGET_DATABASE_URL"
 else
+  confirm_restore
   restore_into "$TARGET_DATABASE_URL"
   apply_contract_state "$TARGET_DATABASE_URL"
   log "restore complete"

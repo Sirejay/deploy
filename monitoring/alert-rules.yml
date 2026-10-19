@@ -231,32 +231,46 @@ groups:
           description: "More than 5% of Soroban RPC requests have failed over the last 5 minutes."
           runbook_url: "https://docs.example.com/runbooks/soroban-rpc"
 
-      - alert: StellarRpcLatencyHigh
+  - name: metrics-instrumentation
+    rules:
+      - alert: DatabaseConnectionPoolMetricsMissing
         expr: |
-          histogram_quantile(
-            0.95,
-            sum(rate(stellar_rpc_request_duration_seconds_bucket{job="backend"}[5m])) by (le)
-          ) > 2
-        for: 10m
+          absent(db_connection_pool_in_use{job="backend"})
+          or
+          absent(db_connection_pool_max{job="backend"})
+        for: 15m
         labels:
           severity: warning
           team: backend
         annotations:
-          summary: "High Stellar RPC latency ({{ $value | humanizeDuration }})"
-          description: "The 95th percentile Stellar RPC request latency has exceeded 2s for more than 10 minutes."
-          runbook_url: "https://docs.example.com/runbooks/stellar-rpc"
+          summary: "Database connection pool metrics are not being exported"
+          description: "The backend is not exporting db_connection_pool_in_use / db_connection_pool_max, so DatabaseConnectionPoolExhausted can never fire. Add the instrumentation in SynapsVault/backend."
+          runbook_url: "https://docs.example.com/runbooks/missing-metrics"
 
-      - alert: SorobanRpcLatencyHigh
+      - alert: StellarRpcMetricsMissing
         expr: |
-          histogram_quantile(
-            0.95,
-            sum(rate(soroban_rpc_request_duration_seconds_bucket{job="backend"}[5m])) by (le)
-          ) > 2
-        for: 10m
+          absent(stellar_rpc_requests_total{job="backend"})
+          or
+          absent(stellar_rpc_errors_total{job="backend"})
+        for: 15m
         labels:
           severity: warning
           team: backend
         annotations:
-          summary: "High Soroban RPC latency ({{ $value | humanizeDuration }})"
-          description: "The 95th percentile Soroban RPC request latency has exceeded 2s for more than 10 minutes."
-          runbook_url: "https://docs.example.com/runbooks/soroban-rpc"
+          summary: "Stellar RPC metrics are not being exported"
+          description: "The backend is not exporting stellar_rpc_requests_total / stellar_rpc_errors_total, so the Stellar RPC alerts can never fire. Add the instrumentation in SynapsVault/backend."
+          runbook_url: "https://docs.example.com/runbooks/missing-metrics"
+
+      - alert: SorobanRpcMetricsMissing
+        expr: |
+          absent(soroban_rpc_requests_total{job="backend"})
+          or
+          absent(soroban_rpc_errors_total{job="backend"})
+        for: 15m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "Soroban RPC metrics are not being exported"
+          description: "The backend is not exporting soroban_rpc_requests_total / soroban_rpc_errors_total, so the Soroban RPC alerts can never fire. Add the instrumentation in SynapsVault/backend."
+          runbook_url: "https://docs.example.com/runbooks/missing-metrics"

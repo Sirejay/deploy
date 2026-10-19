@@ -4,17 +4,21 @@
  * Checks every critical path before submitting to SCF:
  *   ✓ Backend health
  *   ✓ Registry on-chain count
- *   ✓ Catalog returns resources
- *   ✓ x402 paywall returns 402 on unauthenticated access
- *   ✓ Admin stats endpoint works
+ *   ✓ Catalog returns resources (captures a real resource ID)
+ *   ✓ x402 paywall returns 402 on unauthenticated access to a real resource
+ *   ✓ Admin stats endpoint rejects unauthenticated requests and succeeds with valid key
+ *   ✓ OpenAPI docs served
  *
  * Usage:
  *   BACKEND_URL=https://your-app.railway.app \
  *   ADMIN_API_KEY=your_admin_key \
  *   node scripts/06-smoke-test.js
+ *
+ * The base URL may be passed as the first CLI argument (e.g. from CI):
+ *   node scripts/06-smoke-test.js "$DEPLOY_URL/api"
  */
 
-const BASE      = process.env.BACKEND_URL ?? "http://localhost:3000";
+const BASE      = process.argv[2] ?? process.env.BACKEND_URL ?? "http://localhost:3000";
 const ADMIN_KEY = process.env.ADMIN_API_KEY ?? "change_me";
 
 // When run against a freshly started docker-compose stack, services may still
@@ -84,28 +88,54 @@ await check("On-chain registry reachable", async () => {
   return `${d.resourceCount ?? 0} resources registered`;
 });
 
-// Catalog
+// Catalog — capture a real resource ID for the paywall check
+let sampleResourceId = null;
 await check("Catalog returns resources", async () => {
   const d = await get("/resources");
   const items = d.resources ?? d.data ?? d;
-  return `${Array.isArray(items) ? items.length : "?"} item(s)`;
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new Error("Expected at least 1 resource in catalog, got 0");
+  }
+  sampleResourceId = items[0]?.id ?? null;
+  if (!sampleResourceId) {
+    throw new Error("First catalog resource is missing an id field");
+  }
+  return `${items.length} item(s) (sample id=${sampleResourceId})`;
 });
 
-// Paywall — expect 402
+// Paywall — expect 402 against a real catalog resource ID
 await check("x402 paywall blocks unauthenticated access", async () => {
-  const res = await fetch(`${BASE}/resources/any-id`, { redirect: "manual" });
-  if (res.status !== 402) throw new Error(`Expected 402, got ${res.status}`);
-  return "returns 402 as expected";
+  if (!sampleResourceId) {
+    throw new Error("Cannot test paywall: no real resource ID available from catalog");
+  }
+  const res = await fetch(
+    `${BASE}/resources/${encodeURIComponent(sampleResourceId)}`,
+    { redirect: "manual" }
+  );
+  if (res.status !== 402) throw new Error(`Expected 402 for resource ${sampleResourceId}, got ${res.status}`);
+  return `resource ${sampleResourceId} returns 402 as expected`;
 });
 
-// Admin stats
+// Admin stats — verify unauthenticated access is rejected AND authenticated access works
 await check("Admin stats endpoint protected", async () => {
+  const unauthRes = await fetch(`${BASE}/admin/stats`);
+  if (unauthRes.status !== 401 && unauthRes.status !== 403) {
+    throw new Error(`Expected 401/403 without X-Admin-Key, got ${unauthRes.status}`);
+  }
+
+  const badKeyRes = await fetch(`${BASE}/admin/stats`, {
+    headers: { "X-Admin-Key": `${ADMIN_KEY}-invalid` },
+  });
+  if (badKeyRes.status !== 401 && badKeyRes.status !== 403) {
+    throw new Error(`Expected 401/403 with invalid X-Admin-Key, got ${badKeyRes.status}`);
+  }
+
   const res = await fetch(`${BASE}/admin/stats`, {
     headers: { "X-Admin-Key": ADMIN_KEY },
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`Authenticated request failed with HTTP ${res.status}`);
   const d = await res.json();
-  return `resources=${d.resources}, publishers=${d.publishers}`;
+  return `unauth=${unauthRes.status}, auth=200 (resources=${d.resources}, publishers=${d.publishers})`;
 });
 
 // OpenAPI docs
