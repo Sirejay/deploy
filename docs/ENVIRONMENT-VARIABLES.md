@@ -1,461 +1,55 @@
-# Environment Variables Reference
-
-This document is the single source of truth for every environment variable used across the backend, frontend, and deployment scripts of this project. It covers purpose, required/optional status, default values, and recommended values per environment (development, staging, production).
-
-> **Security note:** Never commit real secrets to version control. All `.env` files containing secrets must be listed in `.gitignore`. Use your platform's secret manager (GitHub Actions secrets, Vercel/Netlify env vars, AWS Secrets Manager, Doppler, etc.) for staging and production. The `.env.example` template below contains placeholders only.
-
----
-
-## Table of Contents
-
-1. [Quick Reference](#quick-reference)
-2. [Database & Supabase](#database--supabase)
-3. [Stellar / Soroban Network](#stellar--soroban-network)
-4. [Contracts](#contracts)
-5. [Secrets & API Keys](#secrets--api-keys)
-6. [Server & Runtime](#server--runtime)
-7. [Backup](#backup)
-8. [Docker Compose & Kubernetes](#docker-compose--kubernetes)
-9. [Frontend (Vite)](#frontend-vite)
-10. [Per-Environment Matrix](#per-environment-matrix)
-11. [.env.example Template](#envexample-template)
-12. [Security Notes](#security-notes)
-
----
-
-## Quick Reference
-
-| Variable | Required | Default | Scope |
-|---|---|---|---|
-| `DATABASE_URL` | Yes | — | Backend |
-| `SUPABASE_URL` | Yes | — | Backend / Frontend |
-| `SUPABASE_SERVICE_KEY` | Yes | — | Backend |
-| `SUPABASE_STORAGE_BUCKET` | No | `uploads` | Backend |
-| `STELLAR_NETWORK` | Yes | `testnet` | Backend |
-| `NETWORK` | No | `testnet` | Backend / Scripts |
-| `SOROBAN_RPC_URL` | Yes | — | Backend |
-| `STELLAR_HORIZON_URL` | Yes | — | Backend |
-| `USDC_CONTRACT_ID` | Yes | — | Backend |
-| `PAY_TO` | Yes | — | Backend |
-| `AGENT_SECRET_KEY` | Yes | — | Backend |
-| `REGISTRY_SECRET_KEY` | Yes | — | Backend |
-| `STELLAR_CONTRACT_VAULT_REGISTRY` | Yes | — | Backend |
-| `VAULT_REGISTRY_CONTRACT_ID` | No | — | Backend (deprecated alias) |
-| `REGISTRY_CONTRACT_ID` | No | — | Backend (deprecated alias) |
-| `STELLAR_CONTRACT_ACCESS_LEASE` | Yes | — | Backend |
-| `STELLAR_CONTRACT_SUBSCRIPTION` | Yes | — | Backend |
-| `STELLAR_SECRET_KEY` | Yes | — | Backend / Scripts |
-| `OPENROUTER_API_KEY` | Yes | — | Backend |
-| `ADMIN_API_KEY` | Yes | — | Backend |
-| `NODE_ENV` | No | `development` | Backend |
-| `PORT` | No | `3000` | Backend |
-| `ALLOWED_ORIGINS` | No | `http://localhost:5173` | Backend |
-| `FACILITATOR_URL` | Yes | — | Backend |
-| `BACKUP_ENCRYPTION_KEY` | Yes | — | Backend / Scripts |
-| `BACKUP_STORAGE_BUCKET` | No | `backups` | Backend / Scripts |
-| `BACKUP_STORAGE_ENDPOINT` | No | — | Backend / Scripts |
-| `BACKUP_STORAGE_ACCESS_KEY` | No | — | Backend / Scripts |
-| `BACKUP_STORAGE_SECRET_KEY` | No | — | Backend / Scripts |
-| `BACKUP_RETENTION_DAYS` | No | `30` | Backend / Scripts |
-| `VITE_API_URL` | Yes | `http://localhost:3000` | Frontend |
-| `POSTGRES_USER` | No | `postgres` | Docker Compose |
-| `POSTGRES_PASSWORD` | No | `postgres` | Docker Compose |
-| `POSTGRES_DB` | No | `app` | Docker Compose |
-| `IMAGE_TAG` | No | `latest` | Docker Compose / Kubernetes |
-| `K8S_NAMESPACE` | No | `default` | Kubernetes |
-
----
-
-## Database & Supabase
-
-### `DATABASE_URL`
-- **Purpose:** PostgreSQL connection string used by the backend ORM / query layer.
-- **Required:** Yes
-- **Default:** none
-- **Format:** `postgresql://<user>:<password>@<host>:<port>/<database>?sslmode=require`
-- **Notes:** In production, always use `sslmode=require` and a connection pooler (e.g. Supabase pooler) for serverless deployments.
-
-### `SUPABASE_URL`
-- **Purpose:** Base URL of the Supabase project (used by backend and frontend clients).
-- **Required:** Yes
-- **Default:** none
-- **Format:** `https://<project-ref>.supabase.co`
-
-### `SUPABASE_SERVICE_KEY`
-- **Purpose:** Supabase service-role key. Grants full admin access to the database and storage. **Backend only.**
-- **Required:** Yes
-- **Default:** none
-- **Notes:** Never expose to the frontend. Never prefix with `VITE_`.
-
-### `SUPABASE_STORAGE_BUCKET`
-- **Purpose:** Name of the Supabase Storage bucket used for uploads.
-- **Required:** No
-- **Default:** `uploads`
-
----
-
-## Stellar / Soroban Network
-
-### `STELLAR_NETWORK`
-- **Purpose:** Selects the Stellar network the backend talks to.
-- **Required:** Yes
-- **Default:** `testnet`
-- **Allowed values:** `testnet`, `mainnet`, `futurenet`, `local`
-
-### `NETWORK`
-- **Purpose:** Alias used by deployment scripts and CLI tooling to select the target network.
-- **Required:** No
-- **Default:** `testnet`
-- **Allowed values:** `testnet`, `mainnet`, `local`
-
-### `SOROBAN_RPC_URL`
-- **Purpose:** Soroban RPC endpoint used to submit and simulate contract calls.
-- **Required:** Yes
-- **Default:** none
-- **Examples:**
-  - Testnet: `https://soroban-testnet.stellar.org`
-  - Mainnet: `https://soroban-mainnet.stellar.org`
-
-### `STELLAR_HORIZON_URL`
-- **Purpose:** Horizon endpoint used for account, balance, and transaction queries.
-- **Required:** Yes
-- **Default:** none
-- **Examples:**
-  - Testnet: `https://horizon-testnet.stellar.org`
-  - Mainnet: `https://horizon.stellar.org`
-
-### `USDC_CONTRACT_ID`
-- **Purpose:** Contract ID of the USDC token used for payments.
-- **Required:** Yes
-- **Default:** none
-- **Notes:** Testnet and mainnet have different contract IDs. Verify against the official Circle / Stellar documentation before deploying.
-
----
-
-## Contracts
-
-### `PAY_TO`
-- **Purpose:** Stellar account (public key) that receives payments.
-- **Required:** Yes
-- **Default:** none
-- **Format:** `G...` (56-character Stellar public key)
-
-### `STELLAR_CONTRACT_VAULT_REGISTRY`
-- **Purpose:** Contract ID for the vault registry (used by deployment scripts and backend).
-- **Required:** Yes
-- **Default:** none
-- **Notes:** Canonical name; written to `contract-ids.env` by both deploy paths. The legacy aliases below are normalised to this key by `rollback-contracts.cjs`.
-
-### `STELLAR_CONTRACT_ACCESS_LEASE`
-- **Purpose:** Contract ID for the access-lease contract.
-- **Required:** Yes
-- **Default:** none
-
-### `STELLAR_CONTRACT_SUBSCRIPTION`
-- **Purpose:** Contract ID for the subscription contract.
-- **Required:** Yes
-- **Default:** none
-
-### `VAULT_REGISTRY_CONTRACT_ID` *(deprecated alias)*
-- **Purpose:** Legacy alias of `STELLAR_CONTRACT_VAULT_REGISTRY`.
-- **Required:** No
-- **Default:** none
-- **Notes:** Retained only for backward compatibility with older scripts; new deployments should use `STELLAR_CONTRACT_VAULT_REGISTRY`.
-
-### `REGISTRY_CONTRACT_ID` *(deprecated alias)*
-- **Purpose:** Legacy alias of `STELLAR_CONTRACT_VAULT_REGISTRY`.
-- **Required:** No
-- **Default:** none
-- **Notes:** Retained only for backward compatibility with older scripts; new deployments should use `STELLAR_CONTRACT_VAULT_REGISTRY`.
-
----
-
-## Secrets & API Keys
-
-### `AGENT_SECRET_KEY`
-- **Purpose:** Stellar secret key (`S...`) used by the agent service to sign transactions.
-- **Required:** Yes
-- **Default:** none
-- **Notes:** Store in a secret manager. Rotate regularly. Never log.
-
-### `REGISTRY_SECRET_KEY`
-- **Purpose:** Stellar secret key used to sign registry contract operations.
-- **Required:** Yes
-- **Default:** none
-- **Notes:** Store in a secret manager. Never log.
-
-### `STELLAR_SECRET_KEY`
-- **Purpose:** Generic Stellar secret key used by deployment scripts and CLI tooling.
-- **Required:** Yes
-- **Default:** none
-- **Notes:** In CI, inject via GitHub Actions secrets. Never commit.
-
-### `OPENROUTER_API_KEY`
-- **Purpose:** API key for OpenRouter (LLM inference).
-- **Required:** Yes
-- **Default:** none
-- **Format:** `sk-or-v1-...`
-
-### `ADMIN_API_KEY`
-- **Purpose:** Shared secret used to authenticate admin API requests.
-- **Required:** Yes
-- **Default:** none
-- **Notes:** Generate with a CSPRNG (e.g. `openssl rand -hex 32`). Rotate on any suspected leak.
-
----
-
-## Server & Runtime
-
-### `NODE_ENV`
-- **Purpose:** Node.js runtime mode.
-- **Required:** No
-- **Default:** `development`
-- **Allowed values:** `development`, `test`, `production`
-
-### `PORT`
-- **Purpose:** Port the backend HTTP server listens on.
-- **Required:** No
-- **Default:** `3000`
-
-### `ALLOWED_ORIGINS`
-- **Purpose:** Comma-separated list of origins allowed by CORS.
-- **Required:** No
-- **Default:** `http://localhost:5173`
-- **Example:** `https://app.example.com,https://staging.example.com`
-
-### `FACILITATOR_URL`
-- **Purpose:** Base URL of the payment facilitator service.
-- **Required:** Yes
-- **Default:** none
-- **Examples:**
-  - Development: `http://localhost:4000`
-  - Staging: `https://facilitator.staging.example.com`
-  - Production: `https://facilitator.example.com`
-
----
-
-## Backup
-
-### `BACKUP_ENCRYPTION_KEY`
-- **Purpose:** Symmetric key used to encrypt database and storage backups before they are written to the backup destination.
-- **Required:** Yes
-- **Default:** none
-- **Format:** 32-byte key, base64-encoded (e.g. `openssl rand -base64 32`)
-- **Notes:** Store in a secret manager. Losing this key makes existing backups unrecoverable; rotate only with a re-encryption plan.
-
-### `BACKUP_STORAGE_BUCKET`
-- **Purpose:** Name of the bucket/container where encrypted backups are stored.
-- **Required:** No
-- **Default:** `backups`
-
-### `BACKUP_STORAGE_ENDPOINT`
-- **Purpose:** S3-compatible endpoint for the backup destination (e.g. AWS S3, Cloudflare R2, MinIO).
-- **Required:** No
-- **Default:** none (uses the provider default endpoint)
-- **Examples:**
-  - AWS S3: `https://s3.us-east-1.amazonaws.com`
-  - Cloudflare R2: `https://<account-id>.r2.cloudflarestorage.com`
-  - MinIO (local): `http://localhost:9000`
-
-### `BACKUP_STORAGE_ACCESS_KEY`
-- **Purpose:** Access key ID used to authenticate to the backup storage endpoint.
-- **Required:** No
-- **Default:** none
-- **Notes:** Required when `BACKUP_STORAGE_ENDPOINT` is set. Store in a secret manager.
-
-### `BACKUP_STORAGE_SECRET_KEY`
-- **Purpose:** Secret access key paired with `BACKUP_STORAGE_ACCESS_KEY`.
-- **Required:** No
-- **Default:** none
-- **Notes:** Store in a secret manager. Never log or expose to the frontend.
-
-### `BACKUP_RETENTION_DAYS`
-- **Purpose:** Number of days encrypted backups are retained before automatic pruning.
-- **Required:** No
-- **Default:** `30`
-- **Notes:** Must be a positive integer. Ensure retention meets your compliance requirements.
-
----
-
-## Docker Compose & Kubernetes
-
-These variables are consumed by the deployment manifests rather than by the application code directly. They are grouped here so that operators can find them alongside the rest of the deployment configuration.
-
-### `POSTGRES_USER`
-- **Purpose:** PostgreSQL superuser created by the `postgres` service in `docker-compose.yml`.
-- **Required:** No
-- **Default:** `postgres`
-- **Consumed by:** `docker-compose.yml`
-- **Notes:** Must match the user component of `DATABASE_URL` when running the stack locally.
-
-### `POSTGRES_PASSWORD`
-- **Purpose:** Password for the PostgreSQL superuser in `docker-compose.yml`.
-- **Required:** No
-- **Default:** `postgres`
-- **Consumed by:** `docker-compose.yml`
-- **Notes:** Development default only. Never reuse this value outside local development.
-
-### `POSTGRES_DB`
-- **Purpose:** Name of the database created by the `postgres` service in `docker-compose.yml`.
-- **Required:** No
-- **Default:** `app`
-- **Consumed by:** `docker-compose.yml`
-- **Notes:** Must match the database component of `DATABASE_URL`.
-
-### `IMAGE_TAG`
-- **Purpose:** Container image tag used when pulling/building the backend and frontend images.
-- **Required:** No
-- **Default:** `latest`
-- **Consumed by:** `docker-compose.yml`, Kubernetes manifests
-- **Notes:** In CI, set this to the immutable commit SHA or release tag rather than `latest`.
-
-### `K8S_NAMESPACE`
-- **Purpose:** Kubernetes namespace that the manifests are applied to.
-- **Required:** No
-- **Default:** `default`
-- **Consumed by:** Kubernetes manifests
-- **Notes:** Use a dedicated namespace per environment (e.g. `app-staging`, `app-prod`).
-
-### Where each variable is consumed
-
-- **`docker-compose.yml`** reads `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, and `IMAGE_TAG` from the shell environment or a local `.env` file.
-- **`k8s/configmap.yaml`** holds non-sensitive configuration such as `NODE_ENV`, `PORT`, `ALLOWED_ORIGINS`, `STELLAR_NETWORK`, `SOROBAN_RPC_URL`, `STELLAR_HORIZON_URL`, `IMAGE_TAG`, and `K8S_NAMESPACE`.
-- **`k8s/secrets.yaml`** holds sensitive values such as `DATABASE_URL`, `SUPABASE_SERVICE_KEY`, `AGENT_SECRET_KEY`, `REGISTRY_SECRET_KEY`, `STELLAR_SECRET_KEY`, `OPENROUTER_API_KEY`, and `ADMIN_API_KEY`. These must be created out-of-band (e.g. `kubectl create secret`) and never committed with real values.
-
----
-
-## Frontend (Vite)
-
-### `VITE_API_URL`
-- **Purpose:** Base URL of the backend API consumed by the frontend.
-- **Required:** Yes
-- **Default:** `http://localhost:3000`
-- **Notes:** Only variables prefixed with `VITE_` are exposed to the browser bundle. Never put secrets in a `VITE_` variable.
-
----
-
-## Per-Environment Matrix
-
-| Variable | Development | Staging | Production |
-|---|---|---|---|
-| `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/app` | Supabase pooler URL (staging project) | Supabase pooler URL (prod project, `sslmode=require`) |
-| `SUPABASE_URL` | `https://<dev-ref>.supabase.co` | `https://<staging-ref>.supabase.co` | `https://<prod-ref>.supabase.co` |
-| `SUPABASE_SERVICE_KEY` | Dev service key | Staging service key | Prod service key (secret manager) |
-| `SUPABASE_STORAGE_BUCKET` | `uploads` | `uploads` | `uploads` |
-| `STELLAR_NETWORK` | `testnet` | `testnet` | `mainnet` |
-| `NETWORK` | `testnet` | `testnet` | `mainnet` |
-| `SOROBAN_RPC_URL` | `https://soroban-testnet.stellar.org` | `https://soroban-testnet.stellar.org` | `https://soroban-mainnet.stellar.org` |
-| `STELLAR_HORIZON_URL` | `https://horizon-testnet.stellar.org` | `https://horizon-testnet.stellar.org` | `https://horizon.stellar.org` |
-| `USDC_CONTRACT_ID` | Testnet USDC contract ID | Testnet USDC contract ID | Mainnet USDC contract ID |
-| `PAY_TO` | Dev `G...` account | Staging `G...` account | Prod `G...` account |
-| `AGENT_SECRET_KEY` | Dev `S...` key | Staging `S...` key | Prod `S...` key (secret manager) |
-| `REGISTRY_SECRET_KEY` | Dev `S...` key | Staging `S...` key | Prod `S...` key (secret manager) |
-| `STELLAR_CONTRACT_VAULT_REGISTRY` | Dev contract ID | Staging contract ID | Prod contract ID |
-| `STELLAR_CONTRACT_ACCESS_LEASE` | Dev contract ID | Staging contract ID | Prod contract ID |
-| `STELLAR_CONTRACT_SUBSCRIPTION` | Dev contract ID | Staging contract ID | Prod contract ID |
-| `STELLAR_SECRET_KEY` | Dev `S...` key | Staging `S...` key | Prod `S...` key (secret manager) |
-| `OPENROUTER_API_KEY` | Dev key | Staging key | Prod key (secret manager) |
-| `ADMIN_API_KEY` | Dev random hex | Staging random hex | Prod random hex (secret manager) |
-| `NODE_ENV` | `development` | `production` | `production` |
-| `PORT` | `3000` | `3000` | `3000` |
-| `ALLOWED_ORIGINS` | `http://localhost:5173` | `https://staging.example.com` | `https://app.example.com` |
-| `FACILITATOR_URL` | `http://localhost:4000` | `https://facilitator.staging.example.com` | `https://facilitator.example.com` |
-| `BACKUP_ENCRYPTION_KEY` | Dev base64 key | Staging base64 key | Prod base64 key (secret manager) |
-| `BACKUP_STORAGE_BUCKET` | `backups-dev` | `backups-staging` | `backups-prod` |
-| `BACKUP_STORAGE_ENDPOINT` | `http://localhost:9000` | `https://<account-id>.r2.cloudflarestorage.com` | `https://s3.<region>.amazonaws.com` |
-| `BACKUP_STORAGE_ACCESS_KEY` | Dev access key | Staging access key | Prod access key (secret manager) |
-| `BACKUP_STORAGE_SECRET_KEY` | Dev secret key | Staging secret key | Prod secret key (secret manager) |
-| `BACKUP_RETENTION_DAYS` | `7` | `30` | `90` |
-| `VITE_API_URL` | `http://localhost:3000` | `https://api.staging.example.com` | `https://api.example.com` |
-| `POSTGRES_USER` | `postgres` | `postgres` | `postgres` |
-| `POSTGRES_PASSWORD` | `postgres` | Secret manager | Secret manager |
-| `POSTGRES_DB` | `app` | `app` | `app` |
-| `IMAGE_TAG` | `latest` | Commit SHA | Release tag |
-| `K8S_NAMESPACE` | `default` | `app-staging` | `app-prod` |
-
----
-
-## .env.example Template
-
-Copy this file to `.env` and fill in real values. **Do not commit the resulting `.env`.**
-
-```dotenv
-# ---------------------------------------------------------------------------
-# Database & Supabase
-# ---------------------------------------------------------------------------
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/app
-SUPABASE_URL=https://your-project-ref.supabase.co
-SUPABASE_SERVICE_KEY=your-supabase-service-role-key
-SUPABASE_STORAGE_BUCKET=uploads
-
-# ---------------------------------------------------------------------------
-# Stellar / Soroban Network
-# ---------------------------------------------------------------------------
-STELLAR_NETWORK=testnet
-NETWORK=testnet
-SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
-STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
-USDC_CONTRACT_ID=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-
-# ---------------------------------------------------------------------------
-# Contracts
-# ---------------------------------------------------------------------------
-PAY_TO=GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-STELLAR_CONTRACT_VAULT_REGISTRY=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-STELLAR_CONTRACT_ACCESS_LEASE=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-STELLAR_CONTRACT_SUBSCRIPTION=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-
-# ---------------------------------------------------------------------------
-# Secrets & API Keys
-# ---------------------------------------------------------------------------
-AGENT_SECRET_KEY=SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-REGISTRY_SECRET_KEY=SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-STELLAR_SECRET_KEY=SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-OPENROUTER_API_KEY=sk-or-v1-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-ADMIN_API_KEY=replace-with-openssl-rand-hex-32
-
-# ---------------------------------------------------------------------------
-# Server & Runtime
-# ---------------------------------------------------------------------------
-NODE_ENV=development
-PORT=3000
-ALLOWED_ORIGINS=http://localhost:5173
-FACILITATOR_URL=http://localhost:4000
-
-# ---------------------------------------------------------------------------
-# Backup
-# ---------------------------------------------------------------------------
-BACKUP_ENCRYPTION_KEY=replace-with-openssl-rand-base64-32
-BACKUP_STORAGE_BUCKET=backups
-BACKUP_STORAGE_ENDPOINT=https://s3.us-east-1.amazonaws.com
-BACKUP_STORAGE_ACCESS_KEY=your-backup-storage-access-key
-BACKUP_STORAGE_SECRET_KEY=your-backup-storage-secret-key
-BACKUP_RETENTION_DAYS=30
-
-# ---------------------------------------------------------------------------
-# Frontend (Vite)
-# ---------------------------------------------------------------------------
-VITE_API_URL=http://localhost:3000
-
-# ---------------------------------------------------------------------------
-# Docker Compose & Kubernetes
-# ---------------------------------------------------------------------------
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=postgres
-POSTGRES_DB=app
-IMAGE_TAG=latest
-K8S_NAMESPACE=default
-```
-
----
-
-## Security Notes
-
-- **Never commit secrets.** Add `.env`, `.env.*` (except `.env.example`), and any secret-bearing files to `.gitignore`.
-- **Use a secret manager** for staging and production (GitHub Actions secrets, AWS Secrets Manager, Doppler, Vault, etc.). Do not bake secrets into container images or CI logs.
-- **Rotate on leak.** If a secret is ever committed or logged, rotate it immediately — assume it is compromised.
-- **Least privilege.** Use separate Supabase projects, Stellar accounts, and API keys per environment. Never reuse production credentials in development.
-- **Frontend exposure.** Only variables prefixed with `VITE_` are bundled into the browser. Never place secrets in a `VITE_` variable.
-- **CORS.** Keep `ALLOWED_ORIGINS` tight. Avoid `*` in staging and production.
-- **Logging.** Redact secret values in logs and error reports. Never print full `S...` Stellar keys or service-role keys.
-- **Validation.** The backend should fail fast at startup if any required variable is missing or malformed.
+# Environment Variables
+
+This document is the reference for every environment variable used by the
+backend, the frontend, and the Kubernetes deployment manifests
+(`k8s/configmap.yaml`, `k8s/secrets.yaml`). Names here match what the backend
+code actually reads — `.env.example` and the manifests must stay in sync with
+this list.
+
+## Stellar / Soroban
+
+| Variable | Secret | Description |
+| --- | --- | --- |
+| `STELLAR_NETWORK` | no | `testnet` or `mainnet`. |
+| `STELLAR_RPC_URL` | no | Soroban RPC endpoint (e.g. `https://soroban-testnet.stellar.org`). |
+| `STELLAR_HORIZON_URL` | no | Horizon endpoint used for account / payment lookups. |
+| `STELLAR_NETWORK_PASSPHRASE` | no | Network passphrase matching `STELLAR_NETWORK`. |
+| `STELLAR_AGENT_CONTRACT_ID` | no | Contract ID of the agent registry contract. |
+| `STELLAR_REGISTRY_CONTRACT_ID` | no | Contract ID of the registry contract. |
+| `STELLAR_ESCROW_CONTRACT_ID` | no | Contract ID of the escrow contract. |
+| `USDC_CONTRACT_ID` | no | Contract ID of the USDC token contract. |
+| `AGENT_SECRET_KEY` | **yes** | Stellar secret key (`S...`) used by the agent signer. |
+| `REGISTRY_SECRET_KEY` | **yes** | Stellar secret key (`S...`) used by the registry signer. |
+
+## Supabase
+
+| Variable | Secret | Description |
+| --- | --- | --- |
+| `SUPABASE_URL` | no | Supabase project URL. |
+| `SUPABASE_ANON_KEY` | no | Supabase anon/public key (safe for the frontend). |
+| `SUPABASE_SERVICE_ROLE_KEY` | **yes** | Supabase service role key (backend only). |
+
+## LLM providers
+
+| Variable | Secret | Description |
+| --- | --- | --- |
+| `OPENROUTER_API_KEY` | **yes** | OpenRouter API key used by the agent runtime. |
+| `OPENROUTER_MODEL` | no | Default model identifier (optional). |
+
+## Application
+
+| Variable | Secret | Description |
+| --- | --- | --- |
+| `NODE_ENV` | no | `development` / `production`. |
+| `PORT` | no | HTTP port the backend listens on. |
+| `LOG_LEVEL` | no | Log verbosity (`debug`, `info`, `warn`, `error`). |
+| `CORS_ORIGIN` | no | Allowed frontend origin(s). |
+| `NEXT_PUBLIC_API_URL` | no | Backend base URL consumed by the frontend. |
+
+## Notes
+
+- Secret values live only in `k8s/secrets.yaml` (or your secret manager) and
+  must never be committed with real values.
+- Non-secret values live in `k8s/configmap.yaml` and `.env.example`.
+- When adding a variable, update the backend reader, `.env.example`,
+  `k8s/configmap.yaml` / `k8s/secrets.yaml`, and this document together.

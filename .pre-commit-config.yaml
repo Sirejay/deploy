@@ -1,0 +1,13 @@
+# Pre-commit hooks for the Stellar Soroban Playground.
+# Install with: pip install pre-commit && pre-commit install
+# Run manually against all files: pre-commit run --all-files
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+        name: gitleaks (detect hardcoded secrets)
+        description: Scan staged changes for Stellar secret keys, DB URLs, and other credentials.
+        entry: gitleaks protect --verbose --redact --staged
+        language: golang
+        pass_filenames: false

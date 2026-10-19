@@ -17,32 +17,38 @@
 #   -n, --dry-run        Show what would be rolled back, then roll the
 #                        transaction back instead of committing it.
 #   -y, --yes            Skip the interactive confirmation prompt.
+#   --skip-backup        Skip taking an automatic pre-rollback backup in production.
 #   -h, --help           Show this help message and exit.
 #
 # Environment variables:
 #   DATABASE_URL         Required. Connection string for the target database.
 #   NODE_ENV             Used as the default environment when --env is not given.
+#   ROLLBACK_BACKUP_DIR  Directory for automatic pre-rollback dumps (default: ./backups).
 #
 # Behavior:
 #   - Validates DATABASE_URL, the reverse SQL file and psql before doing anything.
-#   - In production, prompts for explicit confirmation unless --yes is passed.
+#   - In production, prompts for explicit confirmation unless --yes is passed, and
+#     automatically takes a pre-rollback pg_dump backup before reverting.
 #   - Logs the migration being reverted and the outcome.
 #
 # Exit codes:
 #   0  Rollback completed successfully.
 #   1  Invalid usage or missing configuration.
 #   2  User aborted the rollback.
-#   3  Rollback command failed.
+#   3  Rollback command or pre-rollback backup failed.
 #
 
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 ENVIRONMENT="${NODE_ENV:-development}"
 ASSUME_YES="false"
 DRY_RUN="false"
+SKIP_BACKUP="false"
 REVERSE_SQL=""
+BACKUP_DIR="${ROLLBACK_BACKUP_DIR:-./backups}"
 
 log() {
   printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -53,7 +59,7 @@ error() {
 }
 
 usage() {
-  sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [ "$#" -gt 0 ]; do
@@ -80,6 +86,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     -y|--yes)
       ASSUME_YES="true"
+      shift
+      ;;
+    --skip-backup)
+      SKIP_BACKUP="true"
       shift
       ;;
     -h|--help)
@@ -138,6 +148,28 @@ if [ "${ENVIRONMENT}" = "production" ] && [ "${ASSUME_YES}" != "true" ]; then
   if [ "${CONFIRMATION}" != "yes" ]; then
     log "Rollback aborted by user."
     exit 2
+  fi
+fi
+
+if [ "${ENVIRONMENT}" = "production" ] && [ "${DRY_RUN}" != "true" ] && [ "${SKIP_BACKUP}" != "true" ]; then
+  log "Taking automatic pre-rollback backup before modifying production database..."
+  if [ -n "${BACKUP_STORAGE_BUCKET:-}" ] && [ -n "${BACKUP_ENCRYPTION_KEY:-}" ] && [ -x "${SCRIPT_DIR}/backup.sh" ]; then
+    if ! "${SCRIPT_DIR}/backup.sh"; then
+      error "Pre-rollback backup via scripts/backup.sh failed; aborting rollback."
+      exit 3
+    fi
+  else
+    if ! command -v pg_dump >/dev/null 2>&1; then
+      error "pg_dump is required to take a pre-rollback backup in production (or pass --skip-backup)."
+      exit 3
+    fi
+    mkdir -p "${BACKUP_DIR}"
+    PRE_ROLLBACK_FILE="${BACKUP_DIR}/pre-rollback-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
+    if ! pg_dump --no-owner --no-privileges --format=plain --clean --if-exists "${DATABASE_URL}" | gzip -9 > "${PRE_ROLLBACK_FILE}"; then
+      error "Pre-rollback pg_dump failed; aborting rollback."
+      exit 3
+    fi
+    log "Pre-rollback backup saved to ${PRE_ROLLBACK_FILE}"
   fi
 fi
 

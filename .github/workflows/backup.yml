@@ -1,22 +1,9 @@
-name: Database Backup
+name: Backup
 
 on:
   schedule:
-    # Daily backup at 02:00 UTC
     - cron: '0 2 * * *'
-    # Weekly restore verification, Sundays at 04:00 UTC
-    - cron: '0 4 * * 0'
   workflow_dispatch:
-    inputs:
-      job:
-        description: 'What to run'
-        required: true
-        default: 'backup'
-        type: choice
-        options:
-          - backup
-          - verify-restore
-          - both
 
 permissions:
   contents: read
@@ -26,50 +13,20 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Match (or exceed) the major version of the Postgres server being dumped;
-  # pg_dump refuses to dump a newer server. Supabase currently runs 15 or 17.
+  # Aligned with the Postgres major version used for local dev (docker-compose.yml)
+  # and production/Supabase. Keep all three on the same major so dumps taken
+  # here restore cleanly into local dev. See docs/BACKUP-RESTORE.md.
   PG_CLIENT_VERSION: '17'
 
 jobs:
   backup:
-    name: Run Database Backup
-    if: >-
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
-      (github.event_name == 'workflow_dispatch' && inputs.job != 'verify-restore')
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Check configuration
-        id: config
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
-          BACKUP_STORAGE_BUCKET: ${{ secrets.BACKUP_STORAGE_BUCKET }}
-        run: |
-          missing=()
-          [[ -n "$DATABASE_URL" ]] || missing+=(DATABASE_URL)
-          [[ -n "$BACKUP_ENCRYPTION_KEY" ]] || missing+=(BACKUP_ENCRYPTION_KEY)
-          [[ -n "$BACKUP_STORAGE_BUCKET" ]] || missing+=(BACKUP_STORAGE_BUCKET)
-          if (( ${#missing[@]} )); then
-            echo "::warning::Backup skipped: repository secrets not configured: ${missing[*]}. See docs/BACKUP-RESTORE.md."
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Install PostgreSQL client
-        if: steps.config.outputs.ready == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends postgresql-common
-          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          sudo apt-get install -y --no-install-recommends "postgresql-client-${PG_CLIENT_VERSION}" gnupg gzip
-          pg_dump --version
-
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable # stable
       - name: Run backup script
         if: steps.config.outputs.ready == 'true'
         env:
@@ -84,17 +41,21 @@ jobs:
           SOROBAN_RPC_URL: ${{ vars.SOROBAN_RPC_URL }}
           SOROBAN_NETWORK_PASSPHRASE: ${{ vars.SOROBAN_NETWORK_PASSPHRASE }}
           SOROBAN_CONTRACT_IDS: ${{ vars.SOROBAN_CONTRACT_IDS }}
+          PROM_PUSHGATEWAY_URL: ${{ secrets.PROM_PUSHGATEWAY_URL }}
+          BACKUP_RETENTION_DAYS: ${{ vars.BACKUP_RETENTION_DAYS || '30' }}
           BACKUP_OUTPUT_DIR: backups
           GIT_COMMIT: ${{ github.sha }}
           ENVIRONMENT: production
         run: bash scripts/backup.sh
 
-      - name: Upload backup manifest
+      - name: Upload backup manifest and metrics
         if: always() && steps.config.outputs.ready == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: backup-manifest-${{ github.run_id }}
-          path: backups/*.json
+          path: |
+            backups/*.json
+            backups/*.prom
           if-no-files-found: warn
           retention-days: 30
 
@@ -115,33 +76,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Check configuration
-        id: config
-        env:
-          STAGING_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
-          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
-          BACKUP_STORAGE_BUCKET: ${{ secrets.BACKUP_STORAGE_BUCKET }}
-        run: |
-          missing=()
-          [[ -n "$STAGING_DATABASE_URL" ]] || missing+=(STAGING_DATABASE_URL)
-          [[ -n "$BACKUP_ENCRYPTION_KEY" ]] || missing+=(BACKUP_ENCRYPTION_KEY)
-          [[ -n "$BACKUP_STORAGE_BUCKET" ]] || missing+=(BACKUP_STORAGE_BUCKET)
-          if (( ${#missing[@]} )); then
-            echo "::warning::Restore verification skipped: repository secrets not configured: ${missing[*]}. See docs/BACKUP-RESTORE.md."
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2 # v2
 
-      - name: Install PostgreSQL client
-        if: steps.config.outputs.ready == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends postgresql-common
-          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          sudo apt-get install -y --no-install-recommends "postgresql-client-${PG_CLIENT_VERSION}" gnupg gzip
-          psql --version
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4 # v4
 
+      - name: Run backup
+        run: ./scripts/backup.sh
       - name: Run restore verification
         if: steps.config.outputs.ready == 'true'
         env:
@@ -155,3 +97,33 @@ jobs:
           BACKUP_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_STORAGE_SECRET_ACCESS_KEY }}
           BACKUP_STORAGE_ENDPOINT: ${{ secrets.BACKUP_STORAGE_ENDPOINT }}
         run: bash scripts/restore.sh --verify-only
+
+  notify-failure:
+    name: Notify on Backup or Restore Failure
+    needs: [backup, verify-restore]
+    if: >-
+      always() && (
+        needs.backup.result == 'failure' ||
+        needs.verify-restore.result == 'failure'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send failure alert
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          BACKUP_RESULT: ${{ needs.backup.result }}
+          VERIFY_RESULT: ${{ needs.verify-restore.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          msg="SynapsVault Database Backup workflow failed (backup=${BACKUP_RESULT}, verify-restore=${VERIFY_RESULT}): ${RUN_URL}"
+          echo "::error::${msg}"
+          if [[ -n "${ALERT_WEBHOOK_URL}" ]]; then
+            payload="$(printf '{"text":"%s"}' "${msg}")"
+            curl -fsS -X POST -H 'Content-Type: application/json' --data "${payload}" "${ALERT_WEBHOOK_URL}"
+          else
+            echo "::warning::ALERT_WEBHOOK_URL secret is not set; failure logged to workflow summary only."
+          fi
+          echo "### :x: Backup / Restore Verification Failure" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Backup job**: \`${BACKUP_RESULT}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Verify-restore job**: \`${VERIFY_RESULT}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Run URL**: ${RUN_URL}" >> "$GITHUB_STEP_SUMMARY"

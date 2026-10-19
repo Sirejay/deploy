@@ -214,3 +214,76 @@ groups:
           summary: "High Stellar RPC error rate ({{ $value | humanizePercentage }})"
           description: "More than 5% of Stellar RPC requests have failed over the last 5 minutes."
           runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/stellar-rpc.md"
+          runbook_url: "https://docs.example.com/runbooks/stellar-rpc"
+
+      - alert: SorobanRpcErrors
+        expr: |
+          sum(rate(soroban_rpc_errors_total{job="backend"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "Soroban RPC errors detected"
+          description: "The backend is experiencing Soroban RPC errors at a rate of {{ $value | humanize }}/s over the last 5 minutes."
+          runbook_url: "https://docs.example.com/runbooks/soroban-rpc"
+
+      - alert: SorobanRpcHighErrorRate
+        expr: |
+          (
+            sum(rate(soroban_rpc_errors_total{job="backend"}[5m]))
+            /
+            sum(rate(soroban_rpc_requests_total{job="backend"}[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "High Soroban RPC error rate ({{ $value | humanizePercentage }})"
+          description: "More than 5% of Soroban RPC requests have failed over the last 5 minutes."
+          runbook_url: "https://docs.example.com/runbooks/soroban-rpc"
+
+  - name: metrics-instrumentation
+    rules:
+      - alert: DatabaseConnectionPoolMetricsMissing
+        expr: |
+          absent(db_connection_pool_in_use{job="backend"})
+          or
+          absent(db_connection_pool_max{job="backend"})
+        for: 15m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "Database connection pool metrics are not being exported"
+          description: "The backend is not exporting db_connection_pool_in_use / db_connection_pool_max, so DatabaseConnectionPoolExhausted can never fire. Add the instrumentation in SynapsVault/backend."
+          runbook_url: "https://docs.example.com/runbooks/missing-metrics"
+
+      - alert: StellarRpcMetricsMissing
+        expr: |
+          absent(stellar_rpc_requests_total{job="backend"})
+          or
+          absent(stellar_rpc_errors_total{job="backend"})
+        for: 15m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "Stellar RPC metrics are not being exported"
+          description: "The backend is not exporting stellar_rpc_requests_total / stellar_rpc_errors_total, so the Stellar RPC alerts can never fire. Add the instrumentation in SynapsVault/backend."
+          runbook_url: "https://docs.example.com/runbooks/missing-metrics"
+
+      - alert: SorobanRpcMetricsMissing
+        expr: |
+          absent(soroban_rpc_requests_total{job="backend"})
+          or
+          absent(soroban_rpc_errors_total{job="backend"})
+        for: 15m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "Soroban RPC metrics are not being exported"
+          description: "The backend is not exporting soroban_rpc_requests_total / soroban_rpc_errors_total, so the Soroban RPC alerts can never fire. Add the instrumentation in SynapsVault/backend."
+          runbook_url: "https://docs.example.com/runbooks/missing-metrics"

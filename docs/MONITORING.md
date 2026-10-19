@@ -4,6 +4,8 @@ This guide walks through deploying the observability stack for the application: 
 
 All configuration referenced here lives in the [`monitoring/`](../monitoring) directory.
 
+> **Monitoring is optional.** The monitoring services in the root [`docker-compose.yml`](../docker-compose.yml) are gated behind the `monitoring` Compose profile. A plain `docker compose up` starts only the application services; add `--profile monitoring` to also start Prometheus, Grafana, and Alertmanager.
+
 ## Contents
 
 - [Overview](#overview)
@@ -19,6 +21,7 @@ All configuration referenced here lives in the [`monitoring/`](../monitoring) di
   - [Slack](#slack)
 - [6. Verify the setup](#6-verify-the-setup)
 - [Runbooks](#runbooks)
+- [Required metrics](#required-metrics)
 - [Troubleshooting](#troubleshooting)
 
 ## Overview
@@ -88,12 +91,30 @@ Prometheus scrapes metrics over HTTP. The backend must expose a metrics endpoint
 
 The repository ships a Compose file at [`monitoring/docker-compose.yml`](../monitoring/docker-compose.yml) that starts Prometheus, Alertmanager, and Grafana together.
 
+> **Compose profiles:** The monitoring services in the root [`docker-compose.yml`](../docker-compose.yml) are assigned to the `monitoring` profile. They are **not** started by a plain `docker compose up`. To include them, pass the profile explicitly:
+>
+> ```bash
+> docker compose --profile monitoring up -d
+> ```
+>
+> To start only the application services (the default, faster for local dev), omit the flag:
+>
+> ```bash
+> docker compose up -d
+> ```
+
 1. Review and adjust the Compose file and the referenced config files:
    - [`monitoring/prometheus.yml`](../monitoring/prometheus.yml) — scrape targets and rule file references.
    - [`monitoring/alert-rules.yml`](../monitoring/alert-rules.yml) — alerting rules.
    - [`monitoring/alertmanager.yml`](../monitoring/alertmanager.yml) — notification routing.
 
-2. Start the stack:
+2. Start the stack. From the repository root, include the `monitoring` profile:
+
+   ```bash
+   docker compose --profile monitoring up -d
+   ```
+
+   Alternatively, start the standalone monitoring Compose file:
 
    ```bash
    cd monitoring
@@ -103,7 +124,7 @@ The repository ships a Compose file at [`monitoring/docker-compose.yml`](../moni
 3. Confirm the containers are running:
 
    ```bash
-   docker compose ps
+   docker compose --profile monitoring ps
    ```
 
 4. Access the UIs:
@@ -114,7 +135,7 @@ The repository ships a Compose file at [`monitoring/docker-compose.yml`](../moni
 5. To stop the stack:
 
    ```bash
-   docker compose down
+   docker compose --profile monitoring down
    ```
 
 ### Option B: Managed services
@@ -180,7 +201,7 @@ Alert rules are defined in [`monitoring/alert-rules.yml`](../monitoring/alert-ru
    - Or restart the container:
 
      ```bash
-     docker compose restart prometheus
+     docker compose --profile monitoring restart prometheus
      ```
 
 3. Verify the rules loaded: go to **Prometheus → Status → Rules** and confirm the rules from `alert-rules.yml` appear.
@@ -188,6 +209,7 @@ Alert rules are defined in [`monitoring/alert-rules.yml`](../monitoring/alert-ru
 ## 5. Configure Alertmanager notification channels
 
 Alertmanager routing and receivers are configured in [`monitoring/alertmanager.yml`](../monitoring/alertmanager.yml). The examples below show how to add email and Slack receivers. Replace placeholders with your real credentials and keep secrets out of version control.
+Alertmanager routing and receivers are configured in [`monitoring/alertmanager.yml`](../monitoring/alertmanager.yml). The examples below show how to add email and Slack receivers. Replace placeholders with your own values and keep secrets out of version control.
 
 ### Email
 
@@ -200,6 +222,12 @@ receivers:
         smarthost: smtp.example.com:587
         auth_username: alerts@example.com
         auth_password_file: /etc/alertmanager/smtp_password
+      - to: alerts@example.com
+        from: alertmanager@example.com
+        smarthost: smtp.example.com:587
+        auth_username: alertmanager@example.com
+        auth_password_file: /etc/alertmanager/smtp_password
+        auth_password: <smtp-password>
         require_tls: true
 ```
 
@@ -235,3 +263,65 @@ When you add or rename an alert, add a matching runbook under `docs/runbooks/` a
 - **Rules not loading:** validate the YAML and confirm the rule file is mounted at the path in `rule_files`.
 - **Alerts not delivered:** check Alertmanager logs and confirm receiver credentials/secret files are correct.
 - **Dashboard empty:** confirm the Grafana data source points at the correct Prometheus instance.
+        channel: "#alerts"
+        send_resolved: true
+```
+
+Route alerts to the receivers in the `route` block, then reload Alertmanager:
+
+```bash
+curl -X POST http://localhost:9093/-/reload
+```
+
+## 6. Verify the setup
+
+1. Confirm Prometheus is scraping the backend: **Prometheus → Status → Targets** should show the `backend` job as `UP`.
+2. Confirm the required metrics are present (see [Required metrics](#required-metrics)).
+3. Trigger a test alert (e.g. stop the backend) and confirm it reaches your notification channel.
+
+## Required metrics
+
+The alert rules in [`monitoring/alert-rules.yml`](../monitoring/alert-rules.yml) depend on the backend exporting the following metric families. If any of these are missing from the `/metrics` output, the corresponding alerts will silently never fire.
+
+| Metric family | Used for |
+| --- | --- |
+| `db_connection_pool_*` | Database connection pool saturation and exhaustion alerts |
+| `stellar_rpc_*` | Stellar RPC latency, error rate, and availability alerts |
+| `soroban_rpc_*` | Soroban RPC latency, error rate, and availability alerts |
+
+Verify each family is exported before relying on the alerts:
+
+```bash
+curl -s http://localhost:3000/metrics \
+  | grep -E '^(db_connection_pool_|stellar_rpc_|soroban_rpc_)' \
+  | awk -F'{' '{print $1}' | awk '{print $1}' | sort -u
+```
+
+If a family is absent, the backend is missing instrumentation for it. Open an issue in the backend repository (`SynapsVault/backend`) to add the missing metrics. The alert rules include `absent()` checks that fire when a required metric family is not exported, so missing instrumentation surfaces as an alert rather than failing silently.
+
+## Troubleshooting
+
+- **Targets show `DOWN`**: check the scrape target host/port and that the backend is reachable from Prometheus.
+- **No metrics in Grafana**: confirm the data source URL and that the dashboard uses the correct data source.
+- **Alerts never fire**: verify the required metrics are exported (see [Required metrics](#required-metrics)) and that the rule file is loaded.
+- **Reload fails**: ensure Prometheus was started with `--web.enable-lifecycle`.
+      - api_url: https://hooks.slack.com/services/<workspace>/<channel>/<token>
+        channel: '#alerts'
+        send_resolved: true
+```
+
+Route alerts to the receivers under `route:` and reload Alertmanager (or restart the container with `docker compose --profile monitoring restart alertmanager`).
+
+## 6. Verify the setup
+
+1. Confirm Prometheus targets are up: **Prometheus → Status → Targets**.
+2. Confirm rules are loaded: **Prometheus → Status → Rules**.
+3. Confirm Grafana renders the dashboard panels with live data.
+4. Trigger a test alert (e.g. temporarily lower a threshold in `alert-rules.yml`) and confirm it reaches the configured receiver.
+
+## Troubleshooting
+
+- **Monitoring containers not started:** they are behind the `monitoring` profile. Start them with `docker compose --profile monitoring up -d`.
+- **Prometheus target down:** verify the backend metrics endpoint is reachable from the Prometheus container and the scrape target host/port is correct.
+- **No alerts delivered:** check Alertmanager logs (`docker compose --profile monitoring logs alertmanager`) and confirm receiver credentials and routing are correct.
+- **Grafana shows no data:** confirm the Prometheus data source URL and that the dashboard queries match your metric names.

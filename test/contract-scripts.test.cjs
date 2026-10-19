@@ -169,3 +169,89 @@ test('deploy validateEnv resolves RPC, admin and wasm paths', () => {
   );
   assert.equal(self.adminAddress, kp.publicKey());
 });
+
+test('deploy preflightChecks verifies balance and WASM files with a mocked RPC server', async () => {
+  const kp = Keypair.random();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wasm-test-'));
+  const contracts = deploy.CONTRACTS.map((c) => {
+    const wasmPath = path.join(dir, c.wasmFile);
+    fs.writeFileSync(wasmPath, Buffer.from([0x00, 0x61, 0x73, 0x6d]));
+    return { ...c, wasm: wasmPath };
+  });
+
+  const mockServer = {
+    getAccountEntry: async () => ({ balance: () => '250000000' }), // 25 XLM
+  };
+
+  await deploy.preflightChecks({
+    server: mockServer,
+    keypair: kp,
+    network: 'testnet',
+    contracts,
+    dryRun: true,
+  });
+
+  // Low balance should fail preflight
+  const lowBalanceServer = {
+    getAccountEntry: async () => ({ balance: '1000000' }), // 0.1 XLM
+  };
+  await assert.rejects(
+    () =>
+      deploy.preflightChecks({
+        server: lowBalanceServer,
+        keypair: kp,
+        network: 'testnet',
+        contracts,
+        dryRun: false,
+      }),
+    /Insufficient balance/
+  );
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('deploy submitTransaction and pollTransaction handle mocked RPC responses', async () => {
+  const kp = Keypair.random();
+  let signed = false;
+  let pollCalls = 0;
+
+  const mockTx = {};
+  const mockServer = {
+    prepareTransaction: async () => ({
+      sign: () => {
+        signed = true;
+      },
+    }),
+    sendTransaction: async () => ({ status: 'PENDING', hash: 'txhash123' }),
+    getTransaction: async (hash) => {
+      assert.equal(hash, 'txhash123');
+      pollCalls += 1;
+      if (pollCalls === 1) return { status: 'NOT_FOUND' };
+      return { status: 'SUCCESS', hash };
+    },
+  };
+
+  const res = await deploy.submitTransaction({
+    server: mockServer,
+    tx: mockTx,
+    keypair: kp,
+    networkPassphrase: 'Test SDF Network ; September 2015',
+    dryRun: false,
+    label: 'unit-test-tx',
+  });
+
+  assert.equal(signed, true);
+  assert.equal(res.status, 'SUCCESS');
+  assert.ok(pollCalls >= 2);
+
+  // Dry run skips RPC calls entirely
+  const dryRes = await deploy.submitTransaction({
+    server: {},
+    tx: mockTx,
+    keypair: kp,
+    networkPassphrase: 'Test SDF Network ; September 2015',
+    dryRun: true,
+    label: 'dry-run-tx',
+  });
+  assert.equal(dryRes, null);
+});

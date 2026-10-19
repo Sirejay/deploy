@@ -1,21 +1,41 @@
 version: 2
 updates:
-  - package-ecosystem: github-actions
-    directory: /
+  # npm dependencies (grouped minor/patch updates)
+  - package-ecosystem: "npm"
+    directory: "/"
     schedule:
-      interval: weekly
+      interval: "weekly"
     groups:
-      actions:
-        patterns: ['*']
+      npm-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
-  - package-ecosystem: npm
-    directory: /
+  # Docker images referenced in Dockerfiles (grouped minor/patch updates)
+  - package-ecosystem: "docker"
+    directory: "/"
     schedule:
-      interval: weekly
+      interval: "weekly"
+    groups:
+      docker-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
-  - package-ecosystem: docker
-    directories:
-      - /backend
-      - /frontend
+  # Compose images (postgres, prometheus, grafana, alertmanager,
+  # postgres-exporter) pinned in docker-compose.yml (grouped minor/patch)
+  - package-ecosystem: "docker-compose"
+    directory: "/"
     schedule:
-      interval: weekly
+      interval: "weekly"
+    groups:
+      docker-compose-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
