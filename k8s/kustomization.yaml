@@ -15,6 +15,7 @@ resources:
   - frontend-serviceaccount.yaml
   - frontend-deployment.yaml
   - ingress.yaml
+  - clusterissuer.yaml
 
 labels:
   - pairs:

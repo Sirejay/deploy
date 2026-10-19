@@ -22,12 +22,45 @@ Everything lives in the `synapsvault` namespace (set by `k8s/kustomization.yaml`
 | `Service/backend`, `HorizontalPodAutoscaler/backend` | ClusterIP on port 3000; scales 2–10 replicas on CPU |
 | `Deployment/frontend`, `Service/frontend` | nginx serving the built SPA on port 80 |
 | `ConfigMap/backend-config` | Non-secret backend settings (network, RPC URLs, CORS origins) |
+| `ClusterIssuer/letsencrypt-prod` | cert-manager ACME issuer (HTTP-01 via nginx) used by the ingress TLS annotation |
 | `Ingress/app-api` | `https://<host>/api/*` → backend, with the `/api` prefix stripped |
 | `Ingress/app-web` | `https://<host>/*` → frontend |
 
 Before the first deploy, replace `app.example.com` in `k8s/ingress.yaml` and `ALLOWED_ORIGINS` in `k8s/configmap.yaml` with your real host.
 
 Images are built from this repo's `backend/Dockerfile` and `frontend/Dockerfile` with the `SynapsVault/backend` and `SynapsVault/frontend` repositories as build contexts, and pushed to `ghcr.io/synapsvault/deploy/{backend,backend-migrate,frontend}`.
+
+## 0. Install cert-manager and the ClusterIssuer
+
+The ingress requests a certificate via the `cert-manager.io/cluster-issuer: letsencrypt-prod` annotation, so cert-manager and a matching `ClusterIssuer` must exist before the ingress is applied.
+
+1. Install cert-manager (including its CRDs):
+
+   ```sh
+   kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+   ```
+
+   Wait for it to become ready:
+
+   ```sh
+   kubectl wait --for=condition=Available deployment --all -n cert-manager --timeout=180s
+   ```
+
+2. Make sure an ingress controller (e.g. ingress-nginx) is installed and that your domain's DNS `A`/`CNAME` record points at the ingress load balancer address. HTTP-01 validation requires the domain to resolve to the ingress.
+
+3. Edit `k8s/cluster-issuer.yaml` and set `spec.acme.email` to a real contact address (and, optionally, switch `spec.acme.server` to the Let's Encrypt staging URL while testing). Then apply it:
+
+   ```sh
+   kubectl apply -f k8s/cluster-issuer.yaml
+   ```
+
+   It is also part of the kustomization, so `kubectl apply -k k8s/` applies it too. Verify it is ready:
+
+   ```sh
+   kubectl get clusterissuer letsencrypt-prod
+   ```
+
+   The `READY` column should show `True` once the ACME account is registered.
 
 ## 1. Create the secrets
 
@@ -198,8 +231,5 @@ Look at the `Liveness`/`Readiness` sections and the `Events` at the bottom for p
 
 ## Troubleshooting
 
-- **Pods stuck in `Pending`** — check node capacity and scheduling events: `kubectl describe pod <pod> -n synapsvault`.
-- **Pods in `CrashLoopBackOff`** — check logs: `kubectl logs <pod> -n synapsvault --previous`.
-- **Ingress has no address** — confirm an ingress controller is installed and running.
-- **TLS certificate not issued** — check cert-manager: `kubectl describe certificate -n synapsvault` and `kubectl describe certificaterequest -n synapsvault`.
-- **HPA shows `<unknown>` targets** — metrics-server is missing or not ready.
+- **Pods stuck in `Pending`** — check node capacity and scheduling constraints (`kubectl describe pod <pod> -n synapsvault`).
+- **Certificate not issued** — check `kubectl get certificate,order,challenge -n synapsvault` and `kubectl describe certificate <name> -n synapsvault`. Confirm the `ClusterIssuer` is `READY` and that the domain resolves to the ingress.
