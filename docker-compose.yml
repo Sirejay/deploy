@@ -106,6 +106,11 @@ services:
     image: prom/prometheus:v2.53.2
     container_name: app_prometheus
     restart: unless-stopped
+    environment:
+      # Labels metrics/alerts from this compose stack. Defaults to `local` so
+      # local runs are not mistaken for production; set PROMETHEUS_ENVIRONMENT
+      # (e.g. to `production`) when deploying this stack elsewhere.
+      PROMETHEUS_ENVIRONMENT: ${PROMETHEUS_ENVIRONMENT:-local}
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./monitoring/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
