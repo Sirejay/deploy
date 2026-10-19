@@ -20,6 +20,8 @@ env:
   KUBE_LINTER_VERSION: '0.7.1'
   PROMETHEUS_VERSION: '2.53.2'
   ALERTMANAGER_VERSION: '0.27.0'
+  LYCHEE_VERSION: '0.15.1'
+  GITLEAKS_VERSION: '8.18.4'
   TRIVY_VERSION: '0.55.2'
   HADOLINT_VERSION: '2.12.0'
 
@@ -36,6 +38,32 @@ jobs:
       - name: Run actionlint
         # actionlint also runs shellcheck on every `run:` block.
         run: actionlint -color
+
+  secrets:
+    name: Scan for secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+      - name: Run gitleaks
+        run: gitleaks detect --source . --redact --verbose
+
+  links:
+    name: Check Markdown links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install lychee
+        run: |
+          curl -sSfL "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/lychee-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /usr/local/bin lychee
+      - name: Run lychee
+        run: lychee --no-progress --verbose README.md 'docs/**/*.md'
 
   shell:
     name: Lint shell scripts
@@ -122,6 +150,8 @@ jobs:
             | tar -xz --strip-components=1 -C /usr/local/bin "alertmanager-${ALERTMANAGER_VERSION}.linux-amd64/amtool"
       - name: Check alert rules
         run: promtool check rules monitoring/alert-rules.yml
+      - name: Test alert rules
+        run: promtool test rules monitoring/tests/*.yml
       - name: Check Prometheus config
         # prometheus.yml references the rules at their in-container path.
         run: |
@@ -144,6 +174,39 @@ jobs:
           cp .env.example .env
           docker compose config --quiet
 
+  compose-smoke:
+    name: Smoke-test docker-compose startup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Checkout application source
+        uses: actions/checkout@v7
+        with:
+          repository: SynapsVault/backend
+          path: src/backend
+      - name: Checkout frontend source
+        uses: actions/checkout@v7
+        with:
+          repository: SynapsVault/frontend
+          path: src/frontend
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Prepare env
+        run: cp .env.example .env
+      - name: Start stack
+        run: docker compose up -d --wait
+      - name: Run smoke test
+        run: node scripts/06-smoke-test.js
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
   hadolint:
     name: Lint Dockerfiles
     runs-on: ubuntu-latest

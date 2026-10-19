@@ -21,6 +21,12 @@
 const BASE      = process.argv[2] ?? process.env.BACKEND_URL ?? "http://localhost:3000";
 const ADMIN_KEY = process.env.ADMIN_API_KEY ?? "change_me";
 
+// When run against a freshly started docker-compose stack, services may still
+// be warming up even after `docker compose up -d --wait`. Allow a bounded
+// retry window so CI smoke tests are not flaky on cold starts.
+const READY_TIMEOUT_MS = Number(process.env.SMOKE_READY_TIMEOUT_MS ?? 60000);
+const READY_INTERVAL_MS = 2000;
+
 let passed = 0;
 let failed = 0;
 
@@ -41,7 +47,34 @@ async function get(path, headers = {}) {
   return res.json();
 }
 
+async function waitForBackend() {
+  const deadline = Date.now() + READY_TIMEOUT_MS;
+  let lastErr;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${BASE}/health`);
+      if (res.ok) return;
+      lastErr = new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      lastErr = err;
+    }
+    await new Promise((r) => setTimeout(r, READY_INTERVAL_MS));
+  }
+  throw new Error(
+    `Backend not ready at ${BASE}/health within ${READY_TIMEOUT_MS}ms` +
+      (lastErr ? ` (last error: ${lastErr.message})` : "")
+  );
+}
+
 console.log(`\n▸ SynapsVault smoke test — ${BASE}\n`);
+
+// Wait for the stack to accept traffic before running checks.
+try {
+  await waitForBackend();
+} catch (err) {
+  console.error(`  ❌ ${err.message}`);
+  process.exit(1);
+}
 
 // Health
 await check("Backend health", async () => {
