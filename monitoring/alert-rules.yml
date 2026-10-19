@@ -137,14 +137,26 @@ groups:
 
       - alert: DatabaseDown
         expr: |
+          pg_up{job="database"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "Postgres instance {{ $labels.instance }} is down"
+          description: "Postgres target {{ $labels.instance }} reports pg_up == 0 for more than 1 minute, indicating the database itself is unreachable even though the exporter is running."
+          runbook_url: "https://docs.example.com/runbooks/database-down"
+
+      - alert: DatabaseExporterDown
+        expr: |
           up{job="database"} == 0
         for: 1m
         labels:
           severity: critical
           team: backend
         annotations:
-          summary: "Database instance {{ $labels.instance }} is down"
-          description: "Database target {{ $labels.instance }} has been unreachable for more than 1 minute."
+          summary: "Database exporter {{ $labels.instance }} is down"
+          description: "The postgres-exporter target {{ $labels.instance }} has been unreachable for more than 1 minute, so database health cannot be observed."
           runbook_url: "https://docs.example.com/runbooks/database-down"
 
   - name: backups
@@ -211,52 +223,3 @@ groups:
           severity: warning
           team: backend
         annotations:
-          summary: "Soroban RPC errors detected"
-          description: "The backend is experiencing Soroban RPC errors at a rate of {{ $value | humanize }}/s over the last 5 minutes."
-          runbook_url: "https://docs.example.com/runbooks/soroban-rpc"
-
-      - alert: SorobanRpcHighErrorRate
-        expr: |
-          (
-            sum(rate(soroban_rpc_errors_total{job="backend"}[5m]))
-            /
-            sum(rate(soroban_rpc_requests_total{job="backend"}[5m]))
-          ) > 0.05
-        for: 5m
-        labels:
-          severity: critical
-          team: backend
-        annotations:
-          summary: "High Soroban RPC error rate ({{ $value | humanizePercentage }})"
-          description: "More than 5% of Soroban RPC requests have failed over the last 5 minutes."
-          runbook_url: "https://docs.example.com/runbooks/soroban-rpc"
-
-      - alert: StellarRpcLatencyHigh
-        expr: |
-          histogram_quantile(
-            0.95,
-            sum(rate(stellar_rpc_request_duration_seconds_bucket{job="backend"}[5m])) by (le)
-          ) > 2
-        for: 10m
-        labels:
-          severity: warning
-          team: backend
-        annotations:
-          summary: "High Stellar RPC latency ({{ $value | humanizeDuration }})"
-          description: "The 95th percentile Stellar RPC request latency has exceeded 2s for more than 10 minutes."
-          runbook_url: "https://docs.example.com/runbooks/stellar-rpc"
-
-      - alert: SorobanRpcLatencyHigh
-        expr: |
-          histogram_quantile(
-            0.95,
-            sum(rate(soroban_rpc_request_duration_seconds_bucket{job="backend"}[5m])) by (le)
-          ) > 2
-        for: 10m
-        labels:
-          severity: warning
-          team: backend
-        annotations:
-          summary: "High Soroban RPC latency ({{ $value | humanizeDuration }})"
-          description: "The 95th percentile Soroban RPC request latency has exceeded 2s for more than 10 minutes."
-          runbook_url: "https://docs.example.com/runbooks/soroban-rpc"
