@@ -19,6 +19,7 @@ env:
   KUBECONFORM_VERSION: '0.6.7'
   PROMETHEUS_VERSION: '2.53.2'
   ALERTMANAGER_VERSION: '0.27.0'
+  LYCHEE_VERSION: '0.15.1'
 
 jobs:
   workflows:
@@ -33,6 +34,18 @@ jobs:
       - name: Run actionlint
         # actionlint also runs shellcheck on every `run:` block.
         run: actionlint -color
+
+  links:
+    name: Check Markdown links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install lychee
+        run: |
+          curl -sSfL "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/lychee-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /usr/local/bin lychee
+      - name: Run lychee
+        run: lychee --no-progress --verbose README.md 'docs/**/*.md'
 
   shell:
     name: Lint shell scripts
