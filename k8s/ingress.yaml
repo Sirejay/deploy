@@ -4,9 +4,10 @@
 #   /*      -> frontend SPA (which has its own /resources, /admin, ... pages)
 # The frontend is built with VITE_API_URL=/api to match.
 #
-# The host and TLS secret are intentionally left to the Kustomize overlays
-# (k8s/overlays/{staging,production}) so each environment can set its own
-# hostname. The base keeps a placeholder host that overlays must replace.
+# The host and TLS secret are parameterised via Kustomize vars driven by
+# DEPLOY_HOST (see k8s/kustomization.yaml). Set DEPLOY_HOST at deploy time
+# (e.g. `kustomize build --env DEPLOY_HOST=app.example.com` or an overlay
+# patch) and the host, TLS hosts and TLS secret name are all derived from it.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -24,10 +25,10 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts:
-        - app.example.com
-      secretName: app-tls
+        - $(DEPLOY_HOST)
+      secretName: $(DEPLOY_HOST)-tls
   rules:
-    - host: app.example.com
+    - host: $(DEPLOY_HOST)
       http:
         paths:
           - path: /api(/|$)(.*)
@@ -52,10 +53,10 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts:
-        - app.example.com
-      secretName: app-tls
+        - $(DEPLOY_HOST)
+      secretName: $(DEPLOY_HOST)-tls
   rules:
-    - host: app.example.com
+    - host: $(DEPLOY_HOST)
       http:
         paths:
           - path: /

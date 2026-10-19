@@ -13,9 +13,16 @@ data:
   STELLAR_HORIZON_URL: "https://horizon-testnet.stellar.org"
   USDC_CONTRACT_ID: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA"
   FACILITATOR_URL: "http://backend:3000"
-  # Comma-separated browser origins allowed by CORS; set to your public host.
-  ALLOWED_ORIGINS: "https://app.example.com"
+  # Comma-separated browser origins allowed by CORS. The placeholder below is
+  # replaced at deploy time from vars.DEPLOY_HOST via the kustomize
+  # replacements in k8s/kustomization.yaml (see also k8s/ingress.yaml).
+  ALLOWED_ORIGINS: "https://DEPLOY_HOST"
 ---
 # Base defaults only. Environment-specific values (network, RPC/Horizon URLs,
 # USDC contract, ALLOWED_ORIGINS) are overridden per overlay via
 # kustomize patches in k8s/overlays/{staging,production}.
+#
+# ALLOWED_ORIGINS is parameterised: the DEPLOY_HOST token is substituted with
+# the deploy host (vars.DEPLOY_HOST) by the kustomize replacements wired in
+# k8s/kustomization.yaml, so host, TLS secret and CORS origin all derive from
+# a single value.
