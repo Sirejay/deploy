@@ -18,6 +18,7 @@ All configuration referenced here lives in the [`monitoring/`](../monitoring) di
   - [Email](#email)
   - [Slack](#slack)
 - [6. Verify the setup](#6-verify-the-setup)
+- [Runbooks](#runbooks)
 - [Troubleshooting](#troubleshooting)
 
 ## Overview
@@ -186,91 +187,51 @@ Alert rules are defined in [`monitoring/alert-rules.yml`](../monitoring/alert-ru
 
 ## 5. Configure Alertmanager notification channels
 
-Alertmanager routing and receivers are configured in [`monitoring/alertmanager.yml`](../monitoring/alertmanager.yml). The examples below show how to add email and Slack receivers. Replace placeholders with your real values and **do not commit secrets** — use environment variable substitution or a secrets manager.
+Alertmanager routing and receivers are configured in [`monitoring/alertmanager.yml`](../monitoring/alertmanager.yml). The examples below show how to add email and Slack receivers. Replace placeholders with your real credentials and keep secrets out of version control.
 
 ### Email
 
-Add an email receiver and route alerts to it:
-
 ```yaml
-global:
-  smtp_smarthost: "smtp.example.com:587"
-  smtp_from: "alerts@example.com"
-  smtp_auth_username: "alerts@example.com"
-  smtp_auth_password: "<smtp-password>"   # use a secret, not a literal
-  smtp_require_tls: true
-
-route:
-  receiver: "email"
-  group_by: ["alertname"]
-  group_wait: 30s
-  group_interval: 5m
-  repeat_interval: 4h
-
 receivers:
-  - name: "email"
+  - name: email
     email_configs:
-      - to: "oncall@example.com"
-        send_resolved: true
+      - to: oncall@example.com
+        from: alerts@example.com
+        smarthost: smtp.example.com:587
+        auth_username: alerts@example.com
+        auth_password_file: /etc/alertmanager/smtp_password
+        require_tls: true
 ```
 
 ### Slack
 
-Add a Slack receiver using an incoming webhook URL:
-
 ```yaml
 receivers:
-  - name: "slack"
+  - name: slack
     slack_configs:
-      - api_url: "https://hooks.slack.com/services/<T...>/<B...>/<secret>"
-        channel: "#alerts"
+      - api_url_file: /etc/alertmanager/slack_webhook_url
+        channel: '#alerts'
         send_resolved: true
-        title: "{{ .CommonLabels.alertname }}"
-        text: "{{ range .Alerts }}{{ .Annotations.summary }}\n{{ end }}"
 ```
 
-To route different severities to different channels, use multiple routes:
-
-```yaml
-route:
-  receiver: "slack"
-  group_by: ["alertname"]
-  routes:
-    - matchers:
-        - severity = "critical"
-      receiver: "slack"
-      continue: false
-    - matchers:
-        - severity = "warning"
-      receiver: "email"
-```
-
-After editing, reload Alertmanager:
-
-```bash
-curl -X POST http://localhost:9093/-/reload
-```
-
-or restart the container:
-
-```bash
-docker compose restart alertmanager
-```
+Mount the referenced secret files into the Alertmanager container and keep them out of version control.
 
 ## 6. Verify the setup
 
-1. **Metrics scraping** — In Prometheus, go to **Status → Targets** and confirm the `backend` target is `UP`.
-2. **Rules** — In Prometheus, go to **Status → Rules** and confirm the alert rules are loaded.
-3. **Alerts** — In Alertmanager (<http://localhost:9093>), confirm it is reachable and shows any firing alerts.
-4. **Notifications** — Trigger a test alert (or use Alertmanager's built-in test) and confirm it arrives in the configured email/Slack channel.
-5. **Dashboard** — Open the imported Grafana dashboard and confirm panels show live data.
+1. Confirm Prometheus targets are up: **Prometheus → Status → Targets**.
+2. Confirm rules are loaded: **Prometheus → Status → Rules**.
+3. Trigger a test alert (e.g. temporarily lower a threshold) and confirm it reaches Alertmanager and the configured notification channel.
+4. Confirm the alert resolves and a resolved notification is delivered (if `send_resolved` is enabled).
+
+## Runbooks
+
+Every alert in [`monitoring/alert-rules.yml`](../monitoring/alert-rules.yml) links to an operational runbook via its `runbook_url` annotation. Runbooks live in [`docs/runbooks/`](./runbooks) — see the [runbook index](./runbooks/README.md) for the full list.
+
+When you add or rename an alert, add a matching runbook under `docs/runbooks/` and point the alert's `runbook_url` at it.
 
 ## Troubleshooting
 
-- **Target is `DOWN`**: verify the metrics endpoint is reachable from the Prometheus container (`docker compose exec prometheus wget -qO- http://backend:3000/metrics`). Check host/port and network configuration.
-- **No data in Grafana**: confirm the data source URL is correct and that Prometheus has scraped data (**Prometheus → Graph**, query `up`).
-- **Rules not loading**: check the `rule_files` path and that the file is mounted into the container. Inspect Prometheus logs: `docker compose logs prometheus`.
-- **Alerts not delivered**: check Alertmanager logs (`docker compose logs alertmanager`) and confirm the receiver config, webhook URL, and SMTP credentials are correct.
-- **Config errors**: validate configs before reloading:
-  - Prometheus: `promtool check config monitoring/prometheus.yml`
-  - Alertmanager: `amtool check-config monitoring/alertmanager.yml`
+- **No metrics in Prometheus:** check the scrape target, network reachability, and that the backend `/metrics` endpoint responds.
+- **Rules not loading:** validate the YAML and confirm the rule file is mounted at the path in `rule_files`.
+- **Alerts not delivered:** check Alertmanager logs and confirm receiver credentials/secret files are correct.
+- **Dashboard empty:** confirm the Grafana data source points at the correct Prometheus instance.
