@@ -15,3 +15,7 @@ data:
   FACILITATOR_URL: "http://backend:3000"
   # Comma-separated browser origins allowed by CORS; set to your public host.
   ALLOWED_ORIGINS: "https://app.example.com"
+---
+# Base defaults only. Environment-specific values (network, RPC/Horizon URLs,
+# USDC contract, ALLOWED_ORIGINS) are overridden per overlay via
+# kustomize patches in k8s/overlays/{staging,production}.
