@@ -49,6 +49,52 @@ scrape_configs:
           service: 'synapsvault-database'
           tier: 'data'
 
+  # Blackbox probes for the public frontend URL: HTTP availability and TLS
+  # certificate expiry. alert-rules.yml selects on job="blackbox_http" and
+  # job="blackbox_tls".
+  - job_name: 'blackbox_http'
+    metrics_path: '/probe'
+    params:
+      module: ['http_2xx']
+    static_configs:
+      - targets: ['https://synapsvault.example.com']
+        labels:
+          service: 'synapsvault-frontend'
+          tier: 'application'
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 'blackbox-exporter:9115'
+
+  - job_name: 'blackbox_tls'
+    metrics_path: '/probe'
+    params:
+      module: ['http_2xx']
+    static_configs:
+      - targets: ['https://synapsvault.example.com']
+        labels:
+          service: 'synapsvault-frontend'
+          tier: 'application'
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 'blackbox-exporter:9115'
+
+  # kube-state-metrics powers the pod restart / CrashLoopBackOff alerts.
+  - job_name: 'kube-state-metrics'
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['kube-state-metrics:8080']
+        labels:
+          service: 'kube-state-metrics'
+          tier: 'infrastructure'
+
   # Backup metrics (soroban_backup_*) are written by scripts/backup.sh to a
   # node_exporter textfile collector. Uncomment when backups run on a host with
   # node_exporter; the GitHub Actions backup job has no exporter to scrape.
