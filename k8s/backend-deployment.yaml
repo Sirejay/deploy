@@ -69,6 +69,17 @@ spec:
                 name: backend-config
             - secretRef:
                 name: backend-secret
+          env:
+            # Connection pooling: route through Supabase's pooler (port 6543)
+            # or a PgBouncer sidecar/service. DATABASE_URL should point at the
+            # pooler, not the direct Postgres port (5432).
+            # Per-replica pool size is capped so that
+            #   maxReplicas (10) * DB_POOL_MAX (5) = 50
+            # stays within Postgres/Supabase connection limits.
+            - name: DB_POOL_MAX
+              value: "5"
+            - name: DB_POOL_IDLE_TIMEOUT_MS
+              value: "10000"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -283,6 +283,39 @@ To change scaling behavior, edit the HPA (or its manifest in `k8s/`) and re-appl
 kubectl edit hpa <name> -n synapsvault
 ```
 
+### Connection pooling for the HPA-scaled backend
+
+Each backend replica opens its own database connection pool. With the HPA scaling up to 10 replicas, the total number of connections is `replicas × pool size per replica`, which can exhaust Postgres/Supabase connection limits. Keep the total well under the database's limit by pooling connections and capping the per-replica pool size.
+
+**Option A — use Supabase's built-in pooler (recommended).** Supabase exposes a PgBouncer-based pooler on port `6543` (transaction mode) alongside the direct connection on `5432`. Point the backend's `DATABASE_URL` at the pooler so all replicas share a small number of upstream connections:
+
+```
+postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres
+```
+
+Use the pooler host/port (`...pooler.supabase.com:6543`) in the `DATABASE_URL` key of `backend-secret`. Keep the direct `:5432` URL only for the `migrate` initContainer, which needs a session-mode connection for `drizzle-kit migrate`.
+
+**Option B — deploy PgBouncer in the cluster.** If you are not on Supabase (or want pooling inside the cluster), deploy PgBouncer as its own `Deployment`/`Service` in the `synapsvault` namespace and point `DATABASE_URL` at `pgbouncer.synapsvault.svc.cluster.local:6432`. Run it in `transaction` pooling mode and size `default_pool_size` to the database's connection budget (e.g. `default_pool_size = 20` for a 60-connection limit).
+
+**Set the pool size per replica.** Regardless of which option you use, cap the backend's own pool so `maxReplicas × pool size` stays within the database limit. Set `DATABASE_POOL_MAX` in `k8s/configmap.yaml` (non-secret, so it is easy to tune) and reference it from the backend container's `env`:
+
+```yaml
+# k8s/configmap.yaml
+data:
+  DATABASE_POOL_MAX: "5"
+```
+
+```yaml
+# k8s/backend-deployment.yaml (container env)
+- name: DATABASE_POOL_MAX
+  valueFrom:
+    configMapKeyRef:
+      name: backend-config
+      key: DATABASE_POOL_MAX
+```
+
+With `maxReplicas: 10` and `DATABASE_POOL_MAX: "5"`, the backend opens at most 50 connections — comfortably within a typical Supabase/Postgres limit. When raising `maxReplicas`, lower `DATABASE_POOL_MAX` accordingly (or rely on the pooler to multiplex).
+
 ## 7. Probes
 
 The deployments configure separate startup, liveness, and readiness probes so Kubernetes can distinguish between slow container startup, process deadlocks, and temporary downstream dependency outages:
@@ -352,6 +385,12 @@ If the backend signing key (`BACKEND_SECRET_KEY` / `STELLAR_SECRET_KEY`) or the 
 ## Troubleshooting
 
 - **Pods stuck in `Pending`** — check node capacity and scheduling constraints (`kubectl describe pod <pod> -n synapsvault`).
+- **`CrashLoopBackOff`** — inspect logs (`kubectl logs <pod> -n synapsvault --previous`) and confirm `backend-secret` exists with all required keys.
+- **`ImagePullBackOff`** — verify the image tags pinned in `k8s/kustomization.yaml` exist in the registry and that the cluster can pull from `ghcr.io`.
+- **Ingress has no address** — confirm an ingress controller is installed and running.
+- **TLS certificate not issued** — check the `Certificate`/`Order` resources and cert-manager logs.
+- **HPA not scaling** — confirm metrics-server is installed and `kubectl top pods` returns data.
+- **Database connection errors under load** — check the total connection count against the database limit; use the pooler and lower `DATABASE_POOL_MAX` (see [Connection pooling](#connection-pooling-for-the-hpa-scaled-backend)).
 - **Certificate not issued** — check `kubectl get certificate,order,challenge -n synapsvault` and `kubectl describe certificate <name> -n synapsvault`. Confirm the `ClusterIssuer` is `READY` and that the domain resolves to the ingress.
 - **Pods in `CrashLoopBackOff`** — inspect logs (`kubectl logs <pod> -n synapsvault`) and confirm `backend-secret` exists with all required keys.
 - **`ImagePullBackOff`** — verify the image tags and that the cluster can pull from `ghcr.io`.

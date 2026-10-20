@@ -50,6 +50,15 @@ data:
 # a single value.
   # Comma-separated browser origins allowed by CORS; set to your public host.
   ALLOWED_ORIGINS: "https://app.example.com"
+  # Connection pooling for the HPA-scaled backend.
+  # Route DATABASE_URL through Supabase's pooler (port 6543) or a PgBouncer
+  # service so replicas share a bounded set of Postgres connections.
+  # Example: postgres://user:pass@db.<project>.supabase.co:6543/postgres
+  # Keep DB_POOL_SIZE small so (maxReplicas * DB_POOL_SIZE) stays within the
+  # Postgres/Supabase connection limit. With 10 replicas and a 60-connection
+  # budget, 5 per replica leaves headroom for migrations and admin sessions.
+  DB_POOL_SIZE: "5"
+  DB_POOL_TIMEOUT_MS: "10000"
   # Contract IDs deployed to the network above. These are managed in Git so
   # `kubectl apply` and the running config stay in sync. Replace the
   # placeholders with the IDs emitted by the contract deploy, then re-apply:

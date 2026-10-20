@@ -17,6 +17,9 @@ resources:
   - frontend-deployment.yaml
   - pdb.yaml
   - ingress.yaml
+  # Monitoring stack (kube-prometheus-stack CRs). See docs/DEPLOY-KUBERNETES.md.
+  - monitoring/servicemonitors.yaml
+  - monitoring/prometheusrule.yaml
   - clusterissuer.yaml
 
 labels:
