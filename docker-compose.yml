@@ -30,7 +30,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-app}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -46,7 +46,9 @@ services:
   migrate:
     build:
       context: ${BACKEND_SRC:-../backend}
-      dockerfile: ${PWD}/backend/Dockerfile
+      # Dockerfile is resolved relative to the build context, so this works
+      # regardless of the caller's working directory or shell (no ${PWD}).
+      dockerfile: Dockerfile
       target: migrate
     container_name: app_migrate
     environment:
@@ -60,7 +62,7 @@ services:
   backend:
     build:
       context: ${BACKEND_SRC:-../backend}
-      dockerfile: ${PWD}/backend/Dockerfile
+      dockerfile: Dockerfile
       target: runtime
     container_name: app_backend
     restart: unless-stopped
@@ -89,7 +91,7 @@ services:
   frontend:
     build:
       context: ${FRONTEND_SRC:-../frontend}
-      dockerfile: ${PWD}/frontend/Dockerfile
+      dockerfile: Dockerfile
       args:
         # Inlined into the bundle at build time; the browser calls the backend
         # directly on its published port.
@@ -129,6 +131,11 @@ services:
     image: prom/prometheus:v3.15.0
     container_name: app_prometheus
     restart: unless-stopped
+    environment:
+      # Labels metrics/alerts from this compose stack. Defaults to `local` so
+      # local runs are not mistaken for production; set PROMETHEUS_ENVIRONMENT
+      # (e.g. to `production`) when deploying this stack elsewhere.
+      PROMETHEUS_ENVIRONMENT: ${PROMETHEUS_ENVIRONMENT:-local}
     profiles:
       - monitoring
     volumes:
@@ -140,7 +147,7 @@ services:
       - "--storage.tsdb.path=/prometheus"
       - "--web.enable-lifecycle"
     ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
     depends_on:
       backend:
         condition: service_healthy
@@ -166,6 +173,7 @@ services:
       - "--config.file=/etc/alertmanager/alertmanager.yml"
       - "--storage.path=/alertmanager"
     ports:
+      - "127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"
       - "${ALERTMANAGER_PORT:-9093}:9093"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:9093/-/healthy || exit 1"]

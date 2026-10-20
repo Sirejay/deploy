@@ -23,6 +23,82 @@ groups:
           description: "Prometheus has not scraped any backend targets for more than 5 minutes. The service may be removed from service discovery."
           runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/backend-down.md"
 
+  - name: frontend-availability
+    rules:
+      - alert: FrontendDown
+        expr: probe_success{job="blackbox-http"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: frontend
+        annotations:
+          summary: "Frontend public URL {{ $labels.instance }} is unreachable"
+          description: "The blackbox HTTP probe against {{ $labels.instance }} has been failing for more than 2 minutes."
+          runbook_url: "https://docs.example.com/runbooks/frontend-down"
+
+      - alert: FrontendSlowResponse
+        expr: probe_http_duration_seconds{job="blackbox-http", phase="connect"} > 2
+        for: 10m
+        labels:
+          severity: warning
+          team: frontend
+        annotations:
+          summary: "Frontend public URL {{ $labels.instance }} is slow"
+          description: "The blackbox HTTP probe connect phase against {{ $labels.instance }} has exceeded 2s for more than 10 minutes."
+          runbook_url: "https://docs.example.com/runbooks/frontend-down"
+
+  - name: certificate-expiry
+    rules:
+      - alert: TlsCertificateExpiringSoon
+        expr: |
+          (probe_ssl_earliest_cert_expiry{job="blackbox-http"} - time()) < 14 * 24 * 3600
+        for: 1h
+        labels:
+          severity: warning
+          team: frontend
+        annotations:
+          summary: "TLS certificate for {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
+          description: "The TLS certificate served by {{ $labels.instance }} will expire in less than 14 days."
+          runbook_url: "https://docs.example.com/runbooks/certificate-expiry"
+
+      - alert: TlsCertificateExpiringCritical
+        expr: |
+          (probe_ssl_earliest_cert_expiry{job="blackbox-http"} - time()) < 3 * 24 * 3600
+        for: 1h
+        labels:
+          severity: critical
+          team: frontend
+        annotations:
+          summary: "TLS certificate for {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
+          description: "The TLS certificate served by {{ $labels.instance }} will expire in less than 3 days."
+          runbook_url: "https://docs.example.com/runbooks/certificate-expiry"
+
+  - name: pod-restarts
+    rules:
+      - alert: PodCrashLooping
+        expr: |
+          increase(kube_pod_container_status_restarts_total[15m]) > 3
+        for: 5m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is crash looping"
+          description: "Container {{ $labels.container }} in pod {{ $labels.namespace }}/{{ $labels.pod }} has restarted more than 3 times in the last 15 minutes."
+          runbook_url: "https://docs.example.com/runbooks/pod-crash-looping"
+
+      - alert: PodRestartingFrequently
+        expr: |
+          increase(kube_pod_container_status_restarts_total[1h]) > 5
+        for: 10m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is restarting frequently"
+          description: "Container {{ $labels.container }} in pod {{ $labels.namespace }}/{{ $labels.pod }} has restarted more than 5 times in the last hour."
+          runbook_url: "https://docs.example.com/runbooks/pod-crash-looping"
+
   - name: http-errors
     rules:
       - alert: HighHttp5xxErrorRate
@@ -158,6 +234,30 @@ groups:
           summary: "Database exporter {{ $labels.instance }} is down"
           description: "The postgres-exporter target {{ $labels.instance }} has been unreachable for more than 1 minute, so database health cannot be observed."
           runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/database-down.md"
+
+      - alert: PostgresDatabaseSizeHigh
+        expr: |
+          pg_database_size_bytes{job="postgres"} > 10 * 1024 * 1024 * 1024
+        for: 15m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "Postgres database {{ $labels.datname }} is large ({{ $value | humanize1024 }}B)"
+          description: "Postgres database {{ $labels.datname }} on {{ $labels.instance }} exceeds 10 GiB of disk usage."
+          runbook_url: "https://docs.example.com/runbooks/postgres-disk"
+
+      - alert: PostgresDatabaseSizeCritical
+        expr: |
+          pg_database_size_bytes{job="postgres"} > 50 * 1024 * 1024 * 1024
+        for: 15m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "Postgres database {{ $labels.datname }} is critically large ({{ $value | humanize1024 }}B)"
+          description: "Postgres database {{ $labels.datname }} on {{ $labels.instance }} exceeds 50 GiB of disk usage."
+          runbook_url: "https://docs.example.com/runbooks/postgres-disk"
 
   - name: backups
     rules:
