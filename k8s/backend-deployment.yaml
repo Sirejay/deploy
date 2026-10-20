@@ -21,6 +21,8 @@ spec:
       labels:
         app: backend
     spec:
+      serviceAccountName: backend
+      automountServiceAccountToken: false
       # Give Node enough time to drain connections and exit gracefully on SIGTERM.
       terminationGracePeriodSeconds: 30
       securityContext:

@@ -9,12 +9,15 @@ namespace: synapsvault
 resources:
   - namespace.yaml
   - configmap.yaml
+  - backend-serviceaccount.yaml
   - backend-migrate-job.yaml
   - backend-deployment.yaml
   - backend-service.yaml
+  - frontend-serviceaccount.yaml
   - frontend-deployment.yaml
   - pdb.yaml
   - ingress.yaml
+  - clusterissuer.yaml
 
 labels:
   - pairs:
@@ -47,6 +50,34 @@ images:
     newName: ghcr.io/synapsvault/deploy/frontend
     newTag: latest
 
+# Single deploy-time variable driving the ingress host, TLS secret and
+# ALLOWED_ORIGINS. Override with `kustomize edit set var DEPLOY_HOST=...`
+# (or `--env-file`) before `kubectl apply -k`.
+vars:
+  - name: DEPLOY_HOST
+    objref:
+      apiVersion: v1
+      kind: ConfigMap
+      name: synapsvault-config
+
+replacements:
+  - source:
+      kind: ConfigMap
+      name: synapsvault-config
+      fieldPath: data.DEPLOY_HOST
+    targets:
+      - select:
+          kind: Ingress
+          name: synapsvault
+        fieldPaths:
+          - spec.rules[0].host
+          - spec.tls[0].hosts[0]
+          - spec.tls[0].secretName
+      - select:
+          kind: ConfigMap
+          name: synapsvault-config
+        fieldPaths:
+          - data.ALLOWED_ORIGINS
 # Staging and production are built from this base via the overlays in
 # k8s/overlays/{staging,production}. Build them with:
 #   kustomize build k8s/overlays/staging

@@ -2,11 +2,8 @@ name: Deploy to Kubernetes
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
-      - 'backend/**'
-      - 'frontend/**'
       - 'k8s/**'
       - '.github/workflows/deploy-k8s.yml'
   # Triggered by the backend/frontend repos when their code changes.
@@ -35,30 +32,21 @@ on:
       - app-updated
   workflow_dispatch:
     inputs:
-      backend_ref:
-        description: 'Git ref of SynapsVault/backend to build'
+      environment:
+        description: 'Target overlay (staging or production)'
         required: true
-        default: 'main'
-        type: string
-      frontend_ref:
-        description: 'Git ref of SynapsVault/frontend to build'
-        required: true
-        default: 'main'
-        type: string
-
-permissions:
-  contents: read
-
-concurrency:
-  group: deploy-k8s
-  cancel-in-progress: false
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
 
 env:
-  REGISTRY: ghcr.io
+  KUSTOMIZE_VERSION: '5.4.3'
 
 jobs:
-  build-and-push:
-    name: Build and Push Images
+  validate:
+    name: Validate Kustomize overlays
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -68,9 +56,10 @@ jobs:
       image-tag: ${{ steps.meta.outputs.tag }}
       image-prefix: ${{ steps.meta.outputs.prefix }}
     steps:
-      - name: Checkout deploy repository
-        uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v4
 
+      - name: Install kustomize
       # The Dockerfiles live here; the application source lives in sibling repos.
       - name: Checkout backend source
         uses: actions/checkout@v7
@@ -89,20 +78,24 @@ jobs:
       - name: Compute image names
         id: meta
         run: |
-          # Registry paths must be lowercase (the org is "SynapsVault").
-          echo "prefix=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-          echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin kustomize
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Build base
+        run: kustomize build k8s/base > /dev/null
 
-      - name: Log in to the container registry
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build staging overlay
+        run: kustomize build k8s/overlays/staging > /dev/null
 
+      - name: Build production overlay
+        run: kustomize build k8s/overlays/production > /dev/null
+
+  deploy:
+    name: Deploy (${{ github.event.inputs.environment || 'staging' }})
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'staging' }}
       - name: Build and push backend image
         id: build-backend
         uses: docker/build-push-action@v7
@@ -293,14 +286,13 @@ jobs:
       name: production
       url: ${{ vars.DEPLOY_URL }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Check cluster credentials
-        id: config
-        env:
-          KUBECONFIG_B64: ${{ secrets.KUBECONFIG }}
+      - name: Install kustomize
         run: |
+          curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin kustomize
           if [[ -z "$KUBECONFIG_B64" ]]; then
             echo "::warning::Deploy skipped: the KUBECONFIG secret is not configured for the production environment. Images were still built and pushed."
             echo "ready=false" >> "$GITHUB_OUTPUT"
@@ -315,14 +307,15 @@ jobs:
           version: v1.31.0
 
       - name: Configure kubeconfig
-        if: steps.config.outputs.ready == 'true'
-        env:
-          KUBECONFIG_B64: ${{ secrets.KUBECONFIG }}
         run: |
           mkdir -p "$HOME/.kube"
-          printf '%s' "$KUBECONFIG_B64" | base64 -d > "$HOME/.kube/config"
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
           chmod 600 "$HOME/.kube/config"
 
+      - name: Deploy overlay
+        run: |
+          OVERLAY="${{ github.event.inputs.environment || 'staging' }}"
+          kustomize build "k8s/overlays/${OVERLAY}" | kubectl apply -f -
       - name: Pin image tags
         if: steps.config.outputs.ready == 'true'
         working-directory: ./k8s/overlays/production
