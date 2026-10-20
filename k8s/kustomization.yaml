@@ -10,10 +10,12 @@ resources:
   - namespace.yaml
   - configmap.yaml
   - backend-serviceaccount.yaml
+  - backend-migrate-job.yaml
   - backend-deployment.yaml
   - backend-service.yaml
   - frontend-serviceaccount.yaml
   - frontend-deployment.yaml
+  - pdb.yaml
   - ingress.yaml
   - clusterissuer.yaml
 
@@ -24,14 +26,26 @@ labels:
     # Selectors are immutable on existing Deployments; don't touch them.
     includeSelectors: false
 
-# CI pins these to the commit SHA with `kustomize edit set image`.
+# Images are pinned to an explicit tag so a manual `kubectl apply -k k8s/`
+# never deploys `latest` (which, combined with IfNotPresent, lets nodes run
+# different versions). CI overrides these to the commit SHA with
+# `kustomize edit set image`.
+#
+# Manual deploy: pin to the tag/digest you want before applying, e.g.
+#   kustomize edit set image \
+#     backend=ghcr.io/synapsvault/deploy/backend:<tag-or-digest> \
+#     backend-migrate=ghcr.io/synapsvault/deploy/backend-migrate:<tag-or-digest> \
+#     frontend=ghcr.io/synapsvault/deploy/frontend:<tag-or-digest>
+#   kubectl apply -k k8s/
+# Replace <tag-or-digest> with a released tag (e.g. a commit SHA) or a
+# `@sha256:...` digest. Do not commit `latest` back into this file.
 images:
   - name: backend
     newName: ghcr.io/synapsvault/deploy/backend
-    newTag: latest
+    newTag: 0.0.0
   - name: backend-migrate
     newName: ghcr.io/synapsvault/deploy/backend-migrate
-    newTag: latest
+    newTag: 0.0.0
   - name: frontend
     newName: ghcr.io/synapsvault/deploy/frontend
     newTag: latest
@@ -64,3 +78,8 @@ replacements:
           name: synapsvault-config
         fieldPaths:
           - data.ALLOWED_ORIGINS
+# Staging and production are built from this base via the overlays in
+# k8s/overlays/{staging,production}. Build them with:
+#   kustomize build k8s/overlays/staging
+#   kustomize build k8s/overlays/production
+    newTag: 0.0.0

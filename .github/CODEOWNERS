@@ -1,0 +1,12 @@
+# Default owners for everything in the repository
+* @SynapsVault/core
+
+# Kubernetes manifests, Dockerfiles, and CI/CD workflows
+/k8s/ @SynapsVault/core
+/backend/ @SynapsVault/core
+/frontend/ @SynapsVault/core
+/.github/ @SynapsVault/core
+
+# Operational scripts and backup/restore runbooks
+/scripts/ @SynapsVault/core
+/docs/ @SynapsVault/core

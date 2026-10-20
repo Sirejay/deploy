@@ -92,6 +92,39 @@ kubectl create secret generic backend-secret \
 > **Note:** After rotating secrets, restart the workloads so the new values are picked up:
 > `kubectl rollout restart deployment/backend -n synapsvault`.
 
+### Managing `backend-secret` with External Secrets Operator
+
+Instead of creating the secret by hand, you can let the [External Secrets Operator (ESO)](https://external-secrets.io/) sync it from your secret backend (AWS Secrets Manager, Vault, GCP Secret Manager, Azure Key Vault, ...).
+
+1. **Install ESO** into the cluster:
+
+   ```sh
+   helm repo add external-secrets https://charts.external-secrets.io
+   helm install external-secrets external-secrets/external-secrets \
+     --namespace external-secrets --create-namespace
+   ```
+
+2. **Create a `SecretStore`/`ClusterSecretStore`** that points at your secret backend and holds the credentials ESO uses to read it. See the [ESO provider docs](https://external-secrets.io/latest/provider/aws-secrets-manager/) for the exact spec of your provider.
+
+3. **Store the backend values** under a single remote secret (e.g. `synapsvault/backend`) with one property per key listed in `k8s/secrets.yaml` (`DATABASE_URL`, `JWT_SECRET`, `SESSION_SECRET`, ...).
+
+4. **Apply the example manifest**, adjusting `secretStoreRef` and the `remoteRef` keys to match your store:
+
+   ```sh
+   kubectl apply -f k8s/examples/external-secret.yaml
+   ```
+
+   [`k8s/examples/external-secret.yaml`](../k8s/examples/external-secret.yaml) creates an `ExternalSecret` that materializes the `backend-secret` Secret with the same keys the backend expects. It is intentionally **not** part of `k8s/kustomization.yaml`, so `kubectl apply -k k8s/` never touches it.
+
+5. **Verify the sync**:
+
+   ```sh
+   kubectl get externalsecret backend-secret -n synapsvault
+   kubectl get secret backend-secret -n synapsvault
+   ```
+
+   The `ExternalSecret` should report `SecretSynced` and the `backend-secret` Secret should exist. ESO refreshes it on the `refreshInterval` set in the manifest; restart the workloads after a rotation as noted above.
+
 ## 2. Apply the manifests
 
 Build and apply everything under `k8s/` with kustomize:
@@ -106,7 +139,7 @@ To preview what will be applied without changing the cluster:
 kubectl kustomize k8s/
 ```
 
-The manifests reference images by the `:latest` tag. To deploy a specific build, pin the tags first (this is what CI does):
+The manifests reference images by a pinned tag (not `:latest`), so a plain `kubectl apply -k k8s/` deploys a known, reproducible build. To deploy a different build, pin the tags first (this is what CI does):
 
 ```sh
 cd k8s
@@ -116,11 +149,56 @@ kustomize edit set image \
   frontend=ghcr.io/synapsvault/deploy/frontend:<sha>
 ```
 
+Replace `<sha>` with the commit SHA (or any immutable tag/digest) of the build you want to run. Using a digest (`@sha256:...`) is also supported and is the most reproducible option. Commit the resulting `k8s/kustomization.yaml` change if you want the pin to persist.
+
 ### Continuous deployment
 
-The [Deploy to Kubernetes](../.github/workflows/deploy-k8s.yml) workflow runs on pushes to `main` that touch `backend/`, `frontend/` or `k8s/` (or on manual dispatch, where you can choose the app repo refs). It builds and pushes all three images tagged with the commit SHA, pins those tags, applies the kustomization and waits for both rollouts.
+The [Deploy to Kubernetes](../.github/workflows/deploy-k8s.yml) workflow runs on pushes to `main` that touch `backend/`, `frontend/` or `k8s/`, on manual dispatch (where you can choose the app repo refs), and on `repository_dispatch` events sent by the app repos. It builds and pushes all three images tagged with the commit SHA, pins those tags, applies the kustomization and waits for both rollouts.
 
 It needs a base64-encoded kubeconfig in the `KUBECONFIG` secret of the `production` environment (`base64 -w0 < kubeconfig`). Until that secret exists, the deploy job is skipped with a warning; images are still built and pushed.
+
+#### Triggering a deploy from the app repos
+
+The backend and frontend repos can trigger a deploy when they change by sending a `repository_dispatch` event to this repo. The workflow listens for the `app-deploy` event type and reads the refs from the payload:
+
+| `client_payload` field | Default | Purpose |
+| --- | --- | --- |
+| `backend_ref` | `main` | Git ref (branch, tag or SHA) of `SynapsVault/backend` to build |
+| `frontend_ref` | `main` | Git ref (branch, tag or SHA) of `SynapsVault/frontend` to build |
+
+Add a workflow like this to each app repo (`.github/workflows/deploy.yml`). It needs a token with `contents: write` on this repo stored as the `DEPLOY_DISPATCH_TOKEN` secret:
+
+```yaml
+name: Trigger deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch deploy-k8s
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DEPLOY_DISPATCH_TOKEN }}
+          repository: SynapsVault/deploy
+          event-type: app-deploy
+          client-payload: |
+            {
+              "backend_ref": "${{ github.sha }}",
+              "frontend_ref": "${{ github.sha }}"
+            }
+```
+
+Set only the ref for the repo that changed (e.g. the backend repo sends `backend_ref` and leaves `frontend_ref` at its default). You can also dispatch manually with the GitHub CLI:
+
+```sh
+gh api repos/SynapsVault/deploy/dispatches \
+  -f event_type=app-deploy \
+  -f 'client_payload[backend_ref]=<sha>'
+```
 
 ## 3. Verify the rollout
 
@@ -207,11 +285,11 @@ kubectl edit hpa <name> -n synapsvault
 
 ## 7. Probes
 
-The deployment configures liveness and readiness probes so Kubernetes can detect unhealthy pods and route traffic only to healthy ones:
+The deployments configure separate startup, liveness, and readiness probes so Kubernetes can distinguish between slow container startup, process deadlocks, and temporary downstream dependency outages:
 
-- **`livenessProbe`** — restarts the container if the check fails repeatedly. Points at a lightweight health endpoint (e.g. `/healthz`).
-- **`readinessProbe`** — removes the pod from Service endpoints until the check passes, so traffic is only sent to pods that can serve requests (e.g. `/readyz`).
-- **`startupProbe`** (if configured) — gives slow-starting containers time to boot before liveness checks begin.
+- **`startupProbe`** — gates liveness and readiness checks until the container finishes booting (`/health/live`, up to `failureThreshold: 12` × `periodSeconds: 5` = 60 seconds).
+- **`livenessProbe`** — restarts the container only if the process itself is unresponsive (`/health/live`), avoiding cascading restarts when Postgres or Soroban RPC is transiently degraded.
+- **`readinessProbe`** — removes the pod from Service endpoints until downstream dependencies are ready to serve traffic (`/health/ready`).
 
 Each probe sets:
 
@@ -227,9 +305,66 @@ Inspect probe behavior:
 kubectl describe pod <pod> -n synapsvault
 ```
 
-Look at the `Liveness`/`Readiness` sections and the `Events` at the bottom for probe failures.
+Look at the `Startup`/`Liveness`/`Readiness` sections and the `Events` at the bottom for probe failures.
+
+## 8. Emergency Key Rotation (Contract Admin & Backend Signing Key)
+
+If the backend signing key (`BACKEND_SECRET_KEY` / `STELLAR_SECRET_KEY`) or the contract admin key is suspected of compromise, execute the following rotation procedure immediately:
+
+1. **Generate and fund a replacement keypair** on a clean workstation:
+   ```sh
+   node scripts/01-generate-keypairs.js
+   ```
+   Fund the new public key (`GNEW_ADMIN...`) on the target network.
+
+2. **Rotate on-chain contract authority**:
+   - If the deployed contract exposes an admin transfer entrypoint (`set_admin` / `rotate_admin`), invoke it signed by the current admin (or recovery multisig) to assign `GNEW_ADMIN...`:
+     ```sh
+     stellar contract invoke \
+       --id "$STELLAR_CONTRACT_ACCESS_LEASE" \
+       --source current-admin \
+       --network testnet \
+       -- set_admin --new_admin GNEW_ADMIN...
+     ```
+   - If the compromised key was the sole `init(admin)` authority on an immutable contract without an in-place transfer entrypoint, deploy fresh contract instances initialized with `ADMIN_PUBLIC_KEY=GNEW_ADMIN...`:
+     ```sh
+     STELLAR_SECRET_KEY=SNEW_DEPLOYER... \
+     ADMIN_PUBLIC_KEY=GNEW_ADMIN... \
+     npm run deploy:contracts -- --network testnet
+     ```
+
+3. **Update `backend-secret` and `backend-config` in Kubernetes**:
+   ```sh
+   kubectl create secret generic backend-secret \
+     --namespace synapsvault \
+     --from-env-file=./secrets.env \
+     --dry-run=client -o yaml | kubectl apply -f -
+   ```
+   If new contract IDs were deployed, update `k8s/configmap.yaml` (or run `npm run rollback:contracts` against the new `contract-ids.env`) and apply.
+
+4. **Roll out the backend and revoke the old key**:
+   ```sh
+   kubectl rollout restart deployment/backend -n synapsvault
+   kubectl rollout status deployment/backend -n synapsvault
+   ```
+   Decommission the compromised Stellar account (or set its master weight to `0` via a `set_options` operation) so it can no longer sign transactions.
 
 ## Troubleshooting
 
 - **Pods stuck in `Pending`** — check node capacity and scheduling constraints (`kubectl describe pod <pod> -n synapsvault`).
 - **Certificate not issued** — check `kubectl get certificate,order,challenge -n synapsvault` and `kubectl describe certificate <name> -n synapsvault`. Confirm the `ClusterIssuer` is `READY` and that the domain resolves to the ingress.
+- **Pods in `CrashLoopBackOff`** — inspect logs (`kubectl logs <pod> -n synapsvault`) and confirm `backend-secret` exists with all required keys.
+- **`ImagePullBackOff`** — verify the image tags and that the cluster can pull from `ghcr.io`.
+- **Ingress returns 404/502** — confirm the ingress controller is running and the `Ingress` host matches your DNS.
+- **Pods stuck in `Pending`** — check node capacity and scheduling constraints with `kubectl describe pod <pod> -n synapsvault`; look for insufficient CPU/memory or unsatisfied node selectors/taints.
+- **Pods in `ImagePullBackOff`/`ErrImagePull`** — confirm the image tag exists in `ghcr.io/synapsvault/deploy/*` and that the cluster can pull from GHCR (image pull secret if the packages are private).
+- **`CrashLoopBackOff`** — inspect `kubectl logs <pod> -n synapsvault --previous` and the initContainer logs (the `migrate` container runs first).
+- **Ingress returns 404/502** — verify the ingress controller is running, the `Ingress` host matches your DNS, and the backend/frontend Services have ready endpoints (`kubectl get endpoints -n synapsvault`).
+- **TLS certificate not issued** — check the `Certificate`/`Order`/`Challenge` resources and cert-manager logs; ensure the `ClusterIssuer` is valid and DNS points at the ingress.
+- **HPA shows `<unknown>` targets** — metrics-server is missing or not ready; install it and re-check with `kubectl top pods -n synapsvault`.
+- **Pods stuck in `Pending`** — check node capacity and scheduling constraints (`kubectl describe pod <pod> -n synapsvault`), and confirm the cluster has enough CPU/memory for the requested resources.
+- **Pods in `ImagePullBackOff` / `ErrImagePull`** — verify the image tag/digest you pinned actually exists in `ghcr.io/synapsvault/deploy/*` and that the cluster can pull from GHCR (image pull secret if the packages are private).
+- **`CrashLoopBackOff`** — inspect `kubectl logs <pod> -n synapsvault --previous` and confirm the `backend-secret` keys are present and valid.
+- **Ingress has no address** — confirm an ingress controller is installed and running (`kubectl get pods -n ingress-nginx`).
+- **TLS certificate not issued** — check the `Certificate`/`Order`/`Challenge` resources and the cert-manager logs; confirm the `ClusterIssuer` is ready.
+- **HPA shows `<unknown>` targets** — metrics-server is missing or not ready; see section 6.

@@ -1,0 +1,27 @@
+# Development override for docker-compose.yml
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Bind-mounts application sources and runs the dev servers with hot reload
+# instead of the production build/start commands.
+
+services:
+  backend:
+    build:
+      target: development
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app
+    environment:
+      - ENVIRONMENT=development
+
+  frontend:
+    build:
+      target: development
+    command: npm run dev -- --host 0.0.0.0 --port 3000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development

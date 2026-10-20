@@ -717,4 +717,19 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseArgs, validateEnv, CONTRACTS, contractEnvName };
+module.exports = {
+  parseArgs,
+  validateEnv,
+  CONTRACTS,
+  contractEnvName,
+  preflightChecks,
+  submitTransaction,
+  pollTransaction,
+  uploadWasm,
+  deployContract,
+  initContract,
+  verifyContract,
+  loadExistingContractIds,
+  writeContractIds,
+  writeDeploymentRecord,
+};

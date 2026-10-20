@@ -34,7 +34,7 @@ This repo holds deployment tooling only; the application code lives in
 
 | Path | Contents |
 |------|----------|
-| `backend/Dockerfile`, `frontend/Dockerfile` | Image builds (the build context is a checkout of the app repo) |
+| `backend/Dockerfile`, `frontend/Dockerfile` | Image builds (the build context is a checkout of the app repo). Note: both images currently build with `--legacy-peer-deps` because of upstream peer dependency conflicts (`x402-stellar` vs `@stellar/stellar-sdk`) and a missing `package-lock.json` in `SynapsVault/frontend`; override with `--build-arg NPM_FLAGS=` once resolved upstream. |
 | `k8s/` | Kustomize manifests for production |
 | `scripts/` | Contract deploy/rollback, catalog seeding, smoke test, DB backup/restore/rollback |
 | `monitoring/` | Prometheus, Alertmanager and Grafana config |
@@ -233,10 +233,12 @@ Then trigger a redeploy in Vercel.
 
 ```bash
 BACKEND_URL=https://[your-railway-app].up.railway.app \
+PUBLISHER1_PUBLIC=G[PUBLISHER1] \
+PUBLISHER2_PUBLIC=G[PUBLISHER2] \
 node scripts/05-seed-catalog.js
 ```
 
-This publishes 3 real resources to the catalog.
+This idempotently publishes the 3 catalog resources (skipping any that already exist) and exits non-zero if validation or seeding fails.
 
 ### Step 9 — Smoke test
 
