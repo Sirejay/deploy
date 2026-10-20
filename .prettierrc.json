@@ -1,0 +1,17 @@
+{
+  "semi": true,
+  "singleQuote": true,
+  "trailingComma": "es5",
+  "printWidth": 100,
+  "tabWidth": 2,
+  "useTabs": false,
+  "endOfLine": "lf",
+  "overrides": [
+    {
+      "files": ["scripts/01-generate-keypairs.js", "scripts/02-fund-accounts.js", "scripts/05-seed-catalog.js", "scripts/06-smoke-test.js"],
+      "options": {
+        "singleQuote": false
+      }
+    }
+  ]
+}

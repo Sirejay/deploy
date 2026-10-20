@@ -2,37 +2,65 @@
  * SynapsVault — Step 5: Seed the catalog with 3 real resources
  *
  * This script:
- *   1. Creates 2 publisher accounts via the backend API
- *   2. Publishes 3 link resources (real, publicly accessible URLs)
- *   3. Verifies each resource appears in the public catalog
+ *   1. Validates PUBLISHER1_PUBLIC and PUBLISHER2_PUBLIC ed25519 public keys
+ *   2. Checks existing catalog items so re-runs are idempotent
+ *   3. Creates publisher accounts via the backend API (or reuses existing keys)
+ *   4. Publishes any missing link resources (real, publicly accessible URLs)
+ *   5. Verifies each resource appears in the public catalog and exits non-zero on failure
  *
  * Prerequisites:
  *   - Backend API running (local or Railway)
- *   - Set env vars below
+ *   - Set PUBLISHER1_PUBLIC and PUBLISHER2_PUBLIC env vars
  *
  * Usage:
  *   BACKEND_URL=https://your-app.railway.app \
+ *   PUBLISHER1_PUBLIC=G... \
+ *   PUBLISHER2_PUBLIC=G... \
  *   node scripts/05-seed-catalog.js
  */
 
+import { StrKey } from "@stellar/stellar-sdk";
+
 const BASE = process.env.BACKEND_URL ?? "http://localhost:3000";
 
-// ── Real resources to publish ─────────────────────────────────────────────────
-// Each has a real, publicly accessible URL so the x402 paywall demo is genuine.
-const PUBLISHERS = [
-  {
-    name:          "SynapsVault Research Lab",
-    email:         "research@synapsvault.demo",
-    walletAddress: process.env.PUBLISHER1_PUBLIC ?? "GCKIQDFNL4XFUCYVTPXPJQ4B5EQMUMHZXG3IQMPNHILGQBXQNQ4OQQL",
-  },
-  {
-    name:          "SynapsVault Data Studio",
-    email:         "data@synapsvault.demo",
-    walletAddress: process.env.PUBLISHER2_PUBLIC ?? "GDMRXXCJGU7BPQZLULXUIFXKDKWKNZZN2YQJM7SQGFHFQFBUFZXRRCXP",
-  },
-];
+function resolvePublisherWallets(env = process.env) {
+  const pub1 = env.PUBLISHER1_PUBLIC?.trim() ?? "";
+  const pub2 = env.PUBLISHER2_PUBLIC?.trim() ?? "";
+  const errors = [];
 
-const RESOURCES = [
+  if (!pub1) {
+    errors.push("PUBLISHER1_PUBLIC is required");
+  } else if (!StrKey.isValidEd25519PublicKey(pub1)) {
+    errors.push(`PUBLISHER1_PUBLIC is not a valid Stellar ed25519 public key: ${pub1}`);
+  }
+
+  if (!pub2) {
+    errors.push("PUBLISHER2_PUBLIC is required");
+  } else if (!StrKey.isValidEd25519PublicKey(pub2)) {
+    errors.push(`PUBLISHER2_PUBLIC is not a valid Stellar ed25519 public key: ${pub2}`);
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`Invalid publisher configuration:\n  - ${errors.join("\n  - ")}`);
+  }
+
+  return [
+    {
+      name:          "SynapsVault Research Lab",
+      email:         "research@synapsvault.demo",
+      walletAddress: pub1,
+      envApiKey:     env.PUBLISHER1_API_KEY ?? "",
+    },
+    {
+      name:          "SynapsVault Data Studio",
+      email:         "data@synapsvault.demo",
+      walletAddress: pub2,
+      envApiKey:     env.PUBLISHER2_API_KEY ?? "",
+    },
+  ];
+}
+
+export const RESOURCES = [
   {
     publisherIdx: 0,
     title:        "Stellar Soroban Smart Contract Patterns (2025 Edition)",
@@ -73,42 +101,125 @@ async function post(path, body, apiKey) {
   const headers = { "Content-Type": "application/json" };
   if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
   const res  = await fetch(`${BASE}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
-  const json = await res.json();
-  if (!res.ok) throw new Error(`POST ${path} → ${res.status}: ${JSON.stringify(json)}`);
+  const text = await res.text();
+  let json;
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    json = { raw: text };
+  }
+  if (!res.ok) {
+    const err = new Error(`POST ${path} → ${res.status}: ${JSON.stringify(json)}`);
+    err.status = res.status;
+    throw err;
+  }
   return json;
 }
 
 async function get(path) {
   const res  = await fetch(`${BASE}${path}`);
-  const json = await res.json();
-  if (!res.ok) throw new Error(`GET ${path} → ${res.status}: ${JSON.stringify(json)}`);
+  const text = await res.text();
+  let json;
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    json = { raw: text };
+  }
+  if (!res.ok) {
+    const err = new Error(`GET ${path} → ${res.status}: ${JSON.stringify(json)}`);
+    err.status = res.status;
+    throw err;
+  }
   return json;
 }
 
+function extractCatalogItems(catalog) {
+  const items = catalog?.resources ?? catalog?.data ?? catalog;
+  return Array.isArray(items) ? items : [];
+}
+
+function findExistingResource(items, resource) {
+  return items.find(
+    (item) =>
+      item &&
+      (item.title === resource.title ||
+        (item.externalUrl && item.externalUrl === resource.externalUrl))
+  );
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
+let publishers;
+try {
+  publishers = resolvePublisherWallets(process.env);
+} catch (err) {
+  console.error(`\n❌ ${err.message}\n`);
+  process.exit(1);
+}
+
 console.log(`\n▸ Seeding SynapsVault catalog at ${BASE}\n`);
+
+let failures = 0;
+let existingItems = [];
+
+try {
+  const initialCatalog = await get("/resources?listed=true");
+  existingItems = extractCatalogItems(initialCatalog);
+} catch (err) {
+  console.error(`  ❌ Could not fetch existing catalog: ${err.message}`);
+  process.exit(1);
+}
 
 const apiKeys = [];
 
-// 1. Create publishers
-for (const pub of PUBLISHERS) {
+// 1. Create publishers (or reuse existing publisher keys on idempotent re-runs)
+for (let i = 0; i < publishers.length; i++) {
+  const pub = publishers[i];
+  const needsPublish = RESOURCES.some(
+    (r) => r.publisherIdx === i && !findExistingResource(existingItems, r)
+  );
+
   try {
     console.log(`  Creating publisher: ${pub.name}…`);
-    const result = await post("/publishers", pub);
-    apiKeys.push(result.apiKey);
-    console.log(`  ✅ ${pub.name} — API key: ${result.apiKey.slice(0, 12)}…`);
+    const result = await post(
+      "/publishers",
+      { name: pub.name, email: pub.email, walletAddress: pub.walletAddress }
+    );
+    apiKeys.push(result.apiKey ?? pub.envApiKey);
+    console.log(`  ✅ ${pub.name} — API key: ${(result.apiKey ?? "").slice(0, 12)}…`);
   } catch (err) {
-    // Publisher may already exist on re-runs
-    console.warn(`  ⚠  ${pub.name}: ${err.message} (may already exist)`);
-    apiKeys.push(process.env[`PUBLISHER${PUBLISHERS.indexOf(pub) + 1}_API_KEY`] ?? "");
+    if (err.status === 409 || /already exists/i.test(err.message)) {
+      console.warn(`  ℹ  ${pub.name}: publisher already exists`);
+      apiKeys.push(pub.envApiKey);
+      if (needsPublish && !pub.envApiKey) {
+        console.error(
+          `  ❌ ${pub.name} already exists and PUBLISHER${i + 1}_API_KEY is not set to publish missing resources.`
+        );
+        failures++;
+      }
+    } else {
+      console.error(`  ❌ Failed to create publisher ${pub.name}: ${err.message}`);
+      apiKeys.push("");
+      failures++;
+    }
   }
 }
 
-// 2. Publish resources
+// 2. Publish resources idempotently
 const published = [];
 for (const r of RESOURCES) {
+  const existing = findExistingResource(existingItems, r);
+  if (existing) {
+    console.log(`\n  ℹ  Already seeded: "${r.title}" (ID: ${existing.id})`);
+    published.push(existing);
+    continue;
+  }
+
   const apiKey = apiKeys[r.publisherIdx];
-  if (!apiKey) { console.warn(`  ⚠  No API key for publisher ${r.publisherIdx}, skipping.`); continue; }
+  if (!apiKey) {
+    console.error(`  ❌ No API key for publisher ${r.publisherIdx}; cannot publish "${r.title}".`);
+    failures++;
+    continue;
+  }
 
   try {
     console.log(`\n  Publishing: "${r.title}"…`);
@@ -118,10 +229,12 @@ for (const r of RESOURCES) {
       apiKey,
     );
     published.push(result);
+    existingItems.push(result);
     console.log(`  ✅ Resource ID: ${result.id}`);
     console.log(`     Access URL:  ${result.accessUrl}`);
   } catch (err) {
     console.error(`  ❌ Failed to publish "${r.title}": ${err.message}`);
+    failures++;
   }
 }
 
@@ -129,10 +242,20 @@ for (const r of RESOURCES) {
 console.log("\n  Verifying catalog…");
 try {
   const catalog = await get("/resources?listed=true");
-  const items   = catalog.resources ?? catalog.data ?? catalog;
-  console.log(`  ✅ Catalog has ${Array.isArray(items) ? items.length : "?"} listed resource(s)\n`);
+  const items   = extractCatalogItems(catalog);
+  console.log(`  ✅ Catalog has ${items.length} listed resource(s)\n`);
+  if (items.length < RESOURCES.length) {
+    console.error(`  ❌ Expected at least ${RESOURCES.length} catalog resources, found ${items.length}`);
+    failures++;
+  }
 } catch (err) {
-  console.warn(`  ⚠  Catalog check failed: ${err.message}`);
+  console.error(`  ❌ Catalog check failed: ${err.message}`);
+  failures++;
+}
+
+if (failures > 0 || published.length < RESOURCES.length) {
+  console.error(`\n❌ Seeding failed (${failures} error(s), ${published.length}/${RESOURCES.length} resources ready).\n`);
+  process.exit(1);
 }
 
 // 4. Print summary
@@ -141,7 +264,7 @@ console.log("║   Catalog seeded ✅                                  ║");
 console.log("╚══════════════════════════════════════════════════════╝\n");
 console.log("Published resources:");
 for (const r of published) {
-  console.log(`  • ${r.id}  ${r.accessUrl}`);
+  console.log(`  • ${r.id}  ${r.accessUrl ?? r.externalUrl ?? r.title}`);
 }
 console.log("\nNext → verify everything end-to-end:");
 console.log("  node scripts/06-smoke-test.js\n");

@@ -10,7 +10,7 @@ groups:
         annotations:
           summary: "Backend instance {{ $labels.instance }} is down"
           description: "Backend target {{ $labels.instance }} (job {{ $labels.job }}) has been unreachable for more than 1 minute."
-          runbook_url: "https://docs.example.com/runbooks/backend-down"
+          runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/backend-down.md"
 
       - alert: BackendTargetMissing
         expr: absent(up{job="backend"})
@@ -21,7 +21,7 @@ groups:
         annotations:
           summary: "No backend targets are being scraped"
           description: "Prometheus has not scraped any backend targets for more than 5 minutes. The service may be removed from service discovery."
-          runbook_url: "https://docs.example.com/runbooks/backend-down"
+          runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/backend-down.md"
 
   - name: http-errors
     rules:
@@ -39,7 +39,7 @@ groups:
         annotations:
           summary: "High HTTP 5xx error rate ({{ $value | humanizePercentage }})"
           description: "More than 5% of backend HTTP requests have returned 5xx responses over the last 5 minutes."
-          runbook_url: "https://docs.example.com/runbooks/http-5xx"
+          runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/http-5xx.md"
 
       - alert: ElevatedHttp5xxErrorRate
         expr: |
@@ -55,7 +55,7 @@ groups:
         annotations:
           summary: "Elevated HTTP 5xx error rate ({{ $value | humanizePercentage }})"
           description: "More than 1% of backend HTTP requests have returned 5xx responses over the last 10 minutes."
-          runbook_url: "https://docs.example.com/runbooks/http-5xx"
+          runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/http-5xx.md"
 
       - alert: HighHttp4xxErrorRate
         expr: |
@@ -71,7 +71,7 @@ groups:
         annotations:
           summary: "High HTTP 4xx error rate ({{ $value | humanizePercentage }})"
           description: "More than 25% of backend HTTP requests have returned 4xx responses over the last 15 minutes."
-          runbook_url: "https://docs.example.com/runbooks/http-4xx"
+          runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/http-4xx.md"
 
   - name: http-latency
     rules:
@@ -88,7 +88,7 @@ groups:
         annotations:
           summary: "High HTTP p95 latency ({{ $value | humanizeDuration }})"
           description: "The 95th percentile backend HTTP request latency has exceeded 1s for more than 10 minutes."
-          runbook_url: "https://docs.example.com/runbooks/http-latency"
+          runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/http-latency.md"
 
       - alert: CriticalHttpLatencyP99
         expr: |
@@ -103,7 +103,7 @@ groups:
         annotations:
           summary: "Critical HTTP p99 latency ({{ $value | humanizeDuration }})"
           description: "The 99th percentile backend HTTP request latency has exceeded 3s for more than 10 minutes."
-          runbook_url: "https://docs.example.com/runbooks/http-latency"
+          runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/http-latency.md"
 
   - name: database
     rules:
@@ -117,7 +117,7 @@ groups:
         annotations:
           summary: "Database connection failures detected"
           description: "The backend is experiencing database connection errors at a rate of {{ $value | humanize }}/s over the last 5 minutes."
-          runbook_url: "https://docs.example.com/runbooks/database-connection"
+          runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/database-connection.md"
 
       - alert: DatabaseConnectionPoolExhausted
         expr: |
@@ -133,9 +133,21 @@ groups:
         annotations:
           summary: "Database connection pool nearly exhausted ({{ $value | humanizePercentage }})"
           description: "More than 90% of the backend database connection pool has been in use for over 5 minutes."
-          runbook_url: "https://docs.example.com/runbooks/database-connection"
+          runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/database-connection.md"
 
       - alert: DatabaseDown
+        expr: |
+          pg_up{job="database"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "Postgres instance {{ $labels.instance }} is down"
+          description: "Postgres target {{ $labels.instance }} reports pg_up == 0 for more than 1 minute, indicating the database itself is unreachable even though the exporter is running."
+          runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/database-down.md"
+
+      - alert: DatabaseExporterDown
         expr: |
           up{job="database"} == 0
         for: 1m
@@ -143,9 +155,9 @@ groups:
           severity: critical
           team: backend
         annotations:
-          summary: "Database instance {{ $labels.instance }} is down"
-          description: "Database target {{ $labels.instance }} has been unreachable for more than 1 minute."
-          runbook_url: "https://docs.example.com/runbooks/database-down"
+          summary: "Database exporter {{ $labels.instance }} is down"
+          description: "The postgres-exporter target {{ $labels.instance }} has been unreachable for more than 1 minute, so database health cannot be observed."
+          runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/database-down.md"
 
   - name: backups
     rules:
@@ -159,7 +171,7 @@ groups:
         annotations:
           summary: "Backup job failed for {{ $labels.instance }}"
           description: "The most recent backup run for {{ $labels.instance }} did not succeed (soroban_backup_success == 0, written by scripts/backup.sh) for more than 5 minutes."
-          runbook_url: "https://docs.example.com/runbooks/backup-failed"
+          runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/backup-failed.md"
 
       - alert: BackupStale
         expr: |
@@ -171,7 +183,7 @@ groups:
         annotations:
           summary: "Backup is stale for {{ $labels.instance }}"
           description: "The last successful backup for {{ $labels.instance }} was more than 26 hours ago, exceeding the expected backup interval."
-          runbook_url: "https://docs.example.com/runbooks/backup-stale"
+          runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/backup-stale.md"
 
   - name: stellar-soroban-rpc
     rules:
@@ -185,7 +197,7 @@ groups:
         annotations:
           summary: "Stellar RPC errors detected"
           description: "The backend is experiencing Stellar RPC errors at a rate of {{ $value | humanize }}/s over the last 5 minutes."
-          runbook_url: "https://docs.example.com/runbooks/stellar-rpc"
+          runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/stellar-rpc.md"
 
       - alert: StellarRpcHighErrorRate
         expr: |
@@ -196,11 +208,12 @@ groups:
           ) > 0.05
         for: 5m
         labels:
-          severity: critical
+          severity: warning
           team: backend
         annotations:
           summary: "High Stellar RPC error rate ({{ $value | humanizePercentage }})"
           description: "More than 5% of Stellar RPC requests have failed over the last 5 minutes."
+          runbook_url: "https://github.com/example/soroban-backend/blob/main/docs/runbooks/stellar-rpc.md"
           runbook_url: "https://docs.example.com/runbooks/stellar-rpc"
 
       - alert: SorobanRpcErrors
@@ -231,32 +244,46 @@ groups:
           description: "More than 5% of Soroban RPC requests have failed over the last 5 minutes."
           runbook_url: "https://docs.example.com/runbooks/soroban-rpc"
 
-      - alert: StellarRpcLatencyHigh
+  - name: metrics-instrumentation
+    rules:
+      - alert: DatabaseConnectionPoolMetricsMissing
         expr: |
-          histogram_quantile(
-            0.95,
-            sum(rate(stellar_rpc_request_duration_seconds_bucket{job="backend"}[5m])) by (le)
-          ) > 2
-        for: 10m
+          absent(db_connection_pool_in_use{job="backend"})
+          or
+          absent(db_connection_pool_max{job="backend"})
+        for: 15m
         labels:
           severity: warning
           team: backend
         annotations:
-          summary: "High Stellar RPC latency ({{ $value | humanizeDuration }})"
-          description: "The 95th percentile Stellar RPC request latency has exceeded 2s for more than 10 minutes."
-          runbook_url: "https://docs.example.com/runbooks/stellar-rpc"
+          summary: "Database connection pool metrics are not being exported"
+          description: "The backend is not exporting db_connection_pool_in_use / db_connection_pool_max, so DatabaseConnectionPoolExhausted can never fire. Add the instrumentation in SynapsVault/backend."
+          runbook_url: "https://docs.example.com/runbooks/missing-metrics"
 
-      - alert: SorobanRpcLatencyHigh
+      - alert: StellarRpcMetricsMissing
         expr: |
-          histogram_quantile(
-            0.95,
-            sum(rate(soroban_rpc_request_duration_seconds_bucket{job="backend"}[5m])) by (le)
-          ) > 2
-        for: 10m
+          absent(stellar_rpc_requests_total{job="backend"})
+          or
+          absent(stellar_rpc_errors_total{job="backend"})
+        for: 15m
         labels:
           severity: warning
           team: backend
         annotations:
-          summary: "High Soroban RPC latency ({{ $value | humanizeDuration }})"
-          description: "The 95th percentile Soroban RPC request latency has exceeded 2s for more than 10 minutes."
-          runbook_url: "https://docs.example.com/runbooks/soroban-rpc"
+          summary: "Stellar RPC metrics are not being exported"
+          description: "The backend is not exporting stellar_rpc_requests_total / stellar_rpc_errors_total, so the Stellar RPC alerts can never fire. Add the instrumentation in SynapsVault/backend."
+          runbook_url: "https://docs.example.com/runbooks/missing-metrics"
+
+      - alert: SorobanRpcMetricsMissing
+        expr: |
+          absent(soroban_rpc_requests_total{job="backend"})
+          or
+          absent(soroban_rpc_errors_total{job="backend"})
+        for: 15m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "Soroban RPC metrics are not being exported"
+          description: "The backend is not exporting soroban_rpc_requests_total / soroban_rpc_errors_total, so the Soroban RPC alerts can never fire. Add the instrumentation in SynapsVault/backend."
+          runbook_url: "https://docs.example.com/runbooks/missing-metrics"

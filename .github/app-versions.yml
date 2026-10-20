@@ -1,0 +1,10 @@
+# Pinned known-good refs for the backend/frontend app repos.
+# The `docker` CI job builds against these refs so PRs here are not broken
+# by unrelated upstream changes on the app repos' moving `main` branch.
+# Bump these deliberately when you want to pick up new upstream commits.
+backend:
+  repo: your-org/backend
+  ref: main
+frontend:
+  repo: your-org/frontend
+  ref: main

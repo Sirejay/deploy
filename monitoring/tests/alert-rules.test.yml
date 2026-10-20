@@ -1,0 +1,87 @@
+rule_files:
+  - ../alert-rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # BackendDown: backend target is down for longer than the alert's `for` window.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="backend",instance="backend:8080"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BackendDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: backend
+              instance: backend:8080
+            exp_annotations:
+              summary: Backend is down
+              description: Backend target backend:8080 has been down for more than 5 minutes.
+
+  # BackendDown must not fire while the backend is up.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="backend",instance="backend:8080"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BackendDown
+        exp_alerts: []
+
+  # High 5xx rate: >5% of requests returning 5xx over the rate window.
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="backend",status="500"}'
+        values: '0+60x10'
+      - series: 'http_requests_total{job="backend",status="200"}'
+        values: '0+540x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: backend
+            exp_annotations:
+              summary: High 5xx error rate
+              description: More than 5% of requests to backend are failing with 5xx over the last 5 minutes.
+
+  # High 5xx rate must not fire when the error ratio is low.
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="backend",status="500"}'
+        values: '0+1x10'
+      - series: 'http_requests_total{job="backend",status="200"}'
+        values: '0+999x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HighErrorRate
+        exp_alerts: []
+
+  # BackupStale: last successful backup is older than the staleness threshold.
+  - interval: 1m
+    input_series:
+      - series: 'backup_last_success_timestamp_seconds'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Backup is stale
+              description: No successful backup has completed in the last 24 hours.
+
+  # BackupStale must not fire when a recent backup exists.
+  - interval: 1m
+    input_series:
+      - series: 'backup_last_success_timestamp_seconds'
+        values: 'stale'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BackupStale
+        exp_alerts: []

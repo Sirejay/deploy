@@ -45,9 +45,11 @@ ARCHIVE_PATH="${WORK_DIR}/${BACKUP_NAME}.tar.gz"
 ENCRYPTED_PATH="${ARCHIVE_PATH}.enc"
 MANIFEST_PATH="${WORK_DIR}/${BACKUP_NAME}.manifest.json"
 
-# Prometheus textfile collector output.
+# Prometheus textfile collector output and optional Pushgateway endpoint.
 PROM_DIR="${PROM_DIR:-/var/lib/node_exporter/textfile_collector}"
 PROM_FILE="${PROM_FILE:-${PROM_DIR}/soroban_backup.prom}"
+PROM_PUSHGATEWAY_URL="${PROM_PUSHGATEWAY_URL:-}"
+PROM_JOB_NAME="${PROM_JOB_NAME:-soroban_backup}"
 
 # Encryption settings.
 # BACKUP_ENCRYPTION_KEY may be:
@@ -86,6 +88,8 @@ SOROBAN_CONTRACT_IDS_FILE="${SOROBAN_CONTRACT_IDS_FILE:-}"
 BACKUP_SKIP_DB="${BACKUP_SKIP_DB:-0}"
 BACKUP_SKIP_CONTRACTS="${BACKUP_SKIP_CONTRACTS:-0}"
 BACKUP_SKIP_UPLOAD="${BACKUP_SKIP_UPLOAD:-0}"
+BACKUP_SKIP_PRUNE="${BACKUP_SKIP_PRUNE:-0}"
+BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
 BACKUP_VERBOSE="${BACKUP_VERBOSE:-0}"
 BACKUP_OUTPUT_DIR="${BACKUP_OUTPUT_DIR:-}"
 
@@ -213,8 +217,7 @@ check_dependencies() {
 # Prometheus metrics
 # ---------------------------------------------------------------------------
 
-# Emit metrics to the textfile collector. Always overwrites the file so that
-# stale values do not persist across runs.
+# Emit metrics to the textfile collector and/or Prometheus Pushgateway (for CI runs).
 emit_metrics() {
   local success="$1"        # 1 or 0
   local duration_seconds="$2"
@@ -222,13 +225,8 @@ emit_metrics() {
   local last_success_ts="$4" # unix epoch of last success (0 if unknown)
   local error_message="${5:-}"
 
-  if [[ ! -d "${PROM_DIR}" ]]; then
-    debug "Prometheus textfile directory ${PROM_DIR} does not exist; metrics not written"
-    return 0
-  fi
-
-  local tmp
-  tmp="$(mktemp "${PROM_FILE}.XXXXXX")"
+  local payload_file="${WORK_DIR}/soroban_backup.prom"
+  mkdir -p "${WORK_DIR}"
 
   {
     printf '# HELP soroban_backup_success Whether the last backup run succeeded (1=success, 0=failure).\n'
@@ -258,10 +256,33 @@ emit_metrics() {
       escaped="$(printf '%s' "${error_message}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\n/ /g')"
       printf 'soroban_backup_last_error_info{message="%s"} 1\n' "${escaped}"
     fi
-  } > "${tmp}"
+  } > "${payload_file}"
 
-  mv -f "${tmp}" "${PROM_FILE}"
-  debug "Wrote metrics to ${PROM_FILE}"
+  if [[ -d "${PROM_DIR}" ]]; then
+    local tmp
+    tmp="$(mktemp "${PROM_FILE}.XXXXXX")"
+    cp -f "${payload_file}" "${tmp}"
+    mv -f "${tmp}" "${PROM_FILE}"
+    debug "Wrote metrics to ${PROM_FILE}"
+  else
+    debug "Prometheus textfile directory ${PROM_DIR} does not exist; skipping local textfile write"
+  fi
+
+  if [[ -n "${BACKUP_OUTPUT_DIR}" ]]; then
+    mkdir -p "${BACKUP_OUTPUT_DIR}"
+    cp -f "${payload_file}" "${BACKUP_OUTPUT_DIR}/soroban_backup.prom"
+  fi
+
+  if [[ -n "${PROM_PUSHGATEWAY_URL}" ]]; then
+    if command -v curl >/dev/null 2>&1; then
+      if curl -fsS -X POST --data-binary "@${payload_file}" \
+          "${PROM_PUSHGATEWAY_URL%/}/metrics/job/${PROM_JOB_NAME}" >/dev/null; then
+        info "Pushed backup metrics to Pushgateway (${PROM_PUSHGATEWAY_URL%/}/metrics/job/${PROM_JOB_NAME})"
+      else
+        warn "Failed to push backup metrics to Pushgateway (${PROM_PUSHGATEWAY_URL})"
+      fi
+    fi
+  fi
 }
 
 # Read the previous last-success timestamp from the existing metrics file so
@@ -358,22 +379,51 @@ soroban_rpc_call() {
     "${SOROBAN_RPC_URL}"
 }
 
-# Fetch the latest ledger entry for a contract's instance.
+# Fetch the latest ledger entries for a contract's instance and persistent storage.
 fetch_contract_state() {
   local contract_id="$1"
   local out_file="$2"
 
-  local params
-  params="$(printf '{"contractId":"%s"}' "${contract_id}")"
+  local instance_params
+  instance_params="$(printf '{"contractId":"%s","durability":"persistent"}' "${contract_id}")"
 
-  local response
-  if ! response="$(soroban_rpc_call "getContractData" "${params}" 2>/dev/null)"; then
-    warn "Failed to fetch state for contract ${contract_id}"
+  local instance_response
+  if ! instance_response="$(soroban_rpc_call "getContractData" "${instance_params}" 2>/dev/null)"; then
+    warn "Failed to fetch instance state for contract ${contract_id}"
     printf '{"contractId":"%s","error":"rpc_call_failed"}\n' "${contract_id}" > "${out_file}"
     return 1
   fi
 
-  printf '%s\n' "${response}" > "${out_file}"
+  local persistent_entries="[]"
+  if [[ -n "${SOROBAN_CONTRACT_STORAGE_KEYS:-}" ]]; then
+    local -a entry_jsons=()
+    local key_xdr
+    IFS=',' read -r -a _keys <<< "${SOROBAN_CONTRACT_STORAGE_KEYS}"
+    for key_xdr in "${_keys[@]}"; do
+      key_xdr="$(printf '%s' "${key_xdr}" | tr -d '[:space:]')"
+      [[ -z "${key_xdr}" ]] && continue
+      local key_params key_resp
+      key_params="$(printf '{"contractId":"%s","key":"%s","durability":"persistent"}' "${contract_id}" "${key_xdr}")"
+      if key_resp="$(soroban_rpc_call "getContractData" "${key_params}" 2>/dev/null)"; then
+        entry_jsons+=("$(printf '{"key":"%s","result":%s}' "${key_xdr}" "${key_resp}")")
+      fi
+    done
+    if [[ ${#entry_jsons[@]} -gt 0 ]]; then
+      local joined=""
+      local item
+      for item in "${entry_jsons[@]}"; do
+        if [[ -n "${joined}" ]]; then
+          joined="${joined},${item}"
+        else
+          joined="${item}"
+        fi
+      done
+      persistent_entries="[${joined}]"
+    fi
+  fi
+
+  printf '{"contractId":"%s","instance":%s,"persistentStorage":%s}\n' \
+    "${contract_id}" "${instance_response}" "${persistent_entries}" > "${out_file}"
   return 0
 }
 
@@ -472,7 +522,8 @@ encrypt_archive() {
     age)
       info "Encrypting archive with age"
       local recipient="${BACKUP_ENCRYPTION_KEY}"
-      # If the key looks like a path to a file, use it as a recipient file.
+      # check_dependencies already verified that BACKUP_ENCRYPTION_KEY is either
+      # an existing recipients file or an age1... recipient public key.
       if [[ -f "${BACKUP_ENCRYPTION_KEY}" ]]; then
         age --encrypt --recipients-file "${BACKUP_ENCRYPTION_KEY}" \
           --output "${output}" "${input}"
@@ -480,9 +531,7 @@ encrypt_archive() {
         age --encrypt --recipient "${recipient}" \
           --output "${output}" "${input}"
       else
-        # Fall back to passphrase-based age encryption.
-        printf '%s' "${BACKUP_ENCRYPTION_KEY}" \
-          | age --encrypt --passphrase --output "${output}" "${input}"
+        die 2 "age requires an age1... recipient or a recipients file; use gpg for passphrases"
       fi
       ;;
     gpg)
@@ -588,6 +637,17 @@ upload_artifact() {
 # Manifest
 # ---------------------------------------------------------------------------
 
+# Escape arbitrary strings for safe inclusion inside JSON string literals.
+json_escape() {
+  local s="${1:-}"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "${s}"
+}
+
 write_manifest() {
   local encrypted_file="$1"
   local checksum="$2"
@@ -600,39 +660,41 @@ write_manifest() {
   hostname="$(hostname 2>/dev/null || echo unknown)"
   local git_commit="${GIT_COMMIT:-}"
   local environment="${ENVIRONMENT:-${APP_ENV:-unknown}}"
+  local enc_basename
+  enc_basename="$(basename "${encrypted_file}")"
 
   cat > "${MANIFEST_PATH}" <<EOF
 {
-  "name": "${BACKUP_NAME}",
-  "timestamp": "${BACKUP_DATE_ISO}",
+  "name": "$(json_escape "${BACKUP_NAME}")",
+  "timestamp": "$(json_escape "${BACKUP_DATE_ISO}")",
   "timestampEpoch": $(date -u +%s),
   "checksum": {
     "algorithm": "sha256",
-    "value": "${checksum}"
+    "value": "$(json_escape "${checksum}")"
   },
   "sizeBytes": ${size_bytes},
   "encryption": {
-    "method": "${BACKUP_ENCRYPTION_METHOD}",
+    "method": "$(json_escape "${BACKUP_ENCRYPTION_METHOD}")",
     "enabled": $([[ "${BACKUP_ENCRYPTION_METHOD}" == "none" ]] && echo false || echo true)
   },
   "storage": {
-    "provider": "${BACKUP_STORAGE_PROVIDER}",
-    "bucket": "${BACKUP_STORAGE_BUCKET}",
-    "key": "${object_key}"
+    "provider": "$(json_escape "${BACKUP_STORAGE_PROVIDER}")",
+    "bucket": "$(json_escape "${BACKUP_STORAGE_BUCKET}")",
+    "key": "$(json_escape "${object_key}")"
   },
   "source": {
-    "hostname": "${hostname}",
-    "environment": "${environment}",
-    "gitCommit": "${git_commit}",
+    "hostname": "$(json_escape "${hostname}")",
+    "environment": "$(json_escape "${environment}")",
+    "gitCommit": "$(json_escape "${git_commit}")",
     "databaseIncluded": ${db_included},
     "contractsIncluded": ${contracts_included},
-    "sorobanRpcUrl": "${SOROBAN_RPC_URL}",
-    "sorobanNetworkPassphrase": "${SOROBAN_NETWORK_PASSPHRASE}"
+    "sorobanRpcUrl": "$(json_escape "${SOROBAN_RPC_URL}")",
+    "sorobanNetworkPassphrase": "$(json_escape "${SOROBAN_NETWORK_PASSPHRASE}")"
   },
   "artifacts": {
-    "archive": "${BACKUP_NAME}.tar.gz",
-    "encrypted": "$(basename "${encrypted_file}")",
-    "manifest": "${BACKUP_NAME}.manifest.json"
+    "archive": "$(json_escape "${BACKUP_NAME}.tar.gz")",
+    "encrypted": "$(json_escape "${enc_basename}")",
+    "manifest": "$(json_escape "${BACKUP_NAME}.manifest.json")"
   }
 }
 EOF
@@ -693,6 +755,9 @@ main() {
   manifest_key="$(object_key_for "$(basename "${MANIFEST_PATH}")")"
   upload_artifact "${MANIFEST_PATH}" "${manifest_key}"
 
+  # 6b. Prune expired backups exceeding BACKUP_RETENTION_DAYS.
+  prune_old_backups
+
   # 7. Metrics.
   local end_ts duration
   end_ts="$(date -u +%s)"
@@ -709,6 +774,56 @@ main() {
   fi
 
   info "Backup completed successfully in ${duration}s (${size_bytes} bytes, sha256=${checksum})"
+}
+
+prune_old_backups() {
+  if [[ "${BACKUP_SKIP_UPLOAD}" == "1" || "${BACKUP_SKIP_PRUNE}" == "1" ]]; then
+    debug "Skipping backup pruning"
+    return 0
+  fi
+  if [[ -z "${BACKUP_RETENTION_DAYS}" || "${BACKUP_RETENTION_DAYS}" -le 0 ]]; then
+    return 0
+  fi
+
+  local cutoff_ts=""
+  cutoff_ts="$(date -u -d "${BACKUP_RETENTION_DAYS} days ago" +%Y%m%dT%H%M%SZ 2>/dev/null \
+    || date -u -v-"${BACKUP_RETENTION_DAYS}"d +%Y%m%dT%H%M%SZ 2>/dev/null \
+    || true)"
+  if [[ -z "${cutoff_ts}" ]]; then
+    warn "Could not compute retention cutoff timestamp; skipping prune"
+    return 0
+  fi
+
+  info "Pruning backups older than ${BACKUP_RETENTION_DAYS} days (cutoff ${cutoff_ts})"
+
+  if [[ "${BACKUP_STORAGE_PROVIDER}" == "s3" ]]; then
+    local -a args=(--region "${BACKUP_STORAGE_REGION}")
+    if [[ -n "${BACKUP_STORAGE_ENDPOINT}" ]]; then
+      args+=(--endpoint-url "${BACKUP_STORAGE_ENDPOINT%/}")
+    fi
+    local prefix="${BACKUP_STORAGE_PREFIX%/}"
+    local listing=""
+    listing="$(AWS_ACCESS_KEY_ID="${BACKUP_STORAGE_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}" \
+      AWS_SECRET_ACCESS_KEY="${BACKUP_STORAGE_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}" \
+      AWS_SESSION_TOKEN="${BACKUP_STORAGE_SESSION_TOKEN:-${AWS_SESSION_TOKEN:-}}" \
+      aws "${args[@]}" s3 ls "s3://${BACKUP_STORAGE_BUCKET}/${prefix}/" 2>/dev/null || true)"
+
+    local obj_name
+    while IFS= read -r obj_name; do
+      [[ -n "${obj_name}" ]] || continue
+      if [[ "${obj_name}" =~ ^soroban-backup-([0-9]{8}T[0-9]{6}Z)\.(tar\.gz\.enc|manifest\.json)$ ]]; then
+        local obj_ts="${BASH_REMATCH[1]}"
+        if [[ "${obj_ts}" < "${cutoff_ts}" ]]; then
+          info "Deleting expired backup object s3://${BACKUP_STORAGE_BUCKET}/${prefix}/${obj_name}"
+          AWS_ACCESS_KEY_ID="${BACKUP_STORAGE_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}" \
+          AWS_SECRET_ACCESS_KEY="${BACKUP_STORAGE_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}" \
+          AWS_SESSION_TOKEN="${BACKUP_STORAGE_SESSION_TOKEN:-${AWS_SESSION_TOKEN:-}}" \
+            aws "${args[@]}" s3 rm "s3://${BACKUP_STORAGE_BUCKET}/${prefix}/${obj_name}" --only-show-errors || \
+            warn "Failed to delete expired object ${obj_name}"
+        fi
+      fi
+    done < <(printf '%s\n' "${listing}" | awk '{print $4}')
+  fi
 }
 
 # Called directly (not as `if ! main`) so `set -e` stays in effect inside it;
