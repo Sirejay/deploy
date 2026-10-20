@@ -2,6 +2,18 @@
 
 This runbook describes how backups are taken, where they are stored, how long they are retained, and how to restore the system in the event of data loss or corruption.
 
+## 0. PostgreSQL Version Alignment
+
+All environments run **PostgreSQL 17**:
+
+| Environment | Version | Where |
+| --- | --- | --- |
+| Local dev | 17 | `docker-compose.yml` (`postgres:17`) |
+| Production / Supabase | 17 | Supabase project (Postgres 17) |
+| Backup / restore client | 17 | `.github/workflows/backup.yml` (`postgres:17` image) |
+
+**Why:** `pg_dump` output from a newer major version cannot be restored into an older server. Keeping the backup client, local dev and production on the same major version (17) guarantees that dumps taken in CI restore cleanly into local dev and production, and vice versa. When upgrading Postgres, bump all three together.
+
 ## 1. Scope
 
 The following data is backed up:
@@ -68,10 +80,26 @@ Each run writes two objects under `s3://<bucket>/backups/`:
 
 | Metric | Target | Notes |
 | --- | --- | --- |
-| **RPO** (Recovery Point Objective) | 24 hours | One full backup per day |
+| **RPO** (Recovery Point Objective) | 24 hours (logical) / 2 minutes (Supabase PITR) | Daily full `pg_dump` + continuous WAL archiving when PITR is enabled |
 | **RTO** (Recovery Time Objective) | 4 hours | Maximum acceptable downtime |
 
-For a tighter RPO, use your database provider's point-in-time recovery (e.g. Supabase PITR) alongside these logical backups.
+### 6.1 Supabase Point-in-Time Recovery (PITR) vs. Logical `pg_dump` Backups
+
+When hosting PostgreSQL on Supabase in production, enable **Supabase Point-in-Time Recovery (PITR)** alongside the daily encrypted `pg_dump` archives produced by `scripts/backup.sh`:
+
+| Capability | Daily `pg_dump` (`scripts/backup.sh`) | Supabase PITR (Physical + WAL) |
+| --- | --- | --- |
+| **Granularity (RPO)** | 24 hours (02:00 UTC snapshot) | Up to **2 minutes** (any second within retention window) |
+| **Storage Independence** | Independent S3 / R2 / MinIO bucket with client-side `gpg`/`age` encryption | Managed inside Supabase infrastructure (S3 + WALG) |
+| **Contract State Included** | Yes (`contracts/` Soroban RPC snapshots + `manifest.json`) | No (database only) |
+| **Staging Verification** | Automated weekly via `scripts/restore.sh --verify-only` | Manual clone/restore via Supabase Dashboard or Management API |
+
+#### When to use which:
+1. **Accidental table drop, bad migration, or data corruption within the last 7–28 days**:
+   - Use **Supabase PITR** (Dashboard → **Database** → **Backups** → **Point in Time** → select the exact UTC timestamp immediately before the incident) to minimize data loss to `< 2 minutes`.
+   - After PITR finishes, inspect the latest `soroban-backup-*.manifest.json` from object storage if you also need to cross-check on-chain contract IDs.
+2. **Provider outage, region migration, or compliance archive recovery**:
+   - Use `scripts/restore.sh` with the encrypted `pg_dump` archive stored in your external bucket (`BACKUP_STORAGE_BUCKET`) to restore into any standard PostgreSQL 15/17 instance.
 
 ## 7. Restore Procedure
 
@@ -149,14 +177,6 @@ If the restore fails, `restore.sh` rolls its transaction back and exits non-zero
 **Escalation timeline:**
 
 1. Acknowledge the incident within **15 minutes**.
-2. If unresolved after **30 minutes**, escalate to the secondary on-call.
-3. If unresolved after **1 hour**, escalate to the engineering manager.
-4. If a data breach is suspected, notify the security team **immediately**.
-
-## 10. References
-
-- Backup workflow: [`.github/workflows/backup.yml`](../.github/workflows/backup.yml)
-- Restore script: [`scripts/restore.sh`](../scripts/restore.sh)
-- Backup script: [`scripts/backup.sh`](../scripts/backup.sh)
-- Database migration rollback: [`docs/DATABASE-ROLLBACK.md`](./DATABASE-ROLLBACK.md)
-- Environment variables: [`docs/ENVIRONMENT-VARIABLES.md`](./ENVIRONMENT-VARIABLES.md)
+2. If unresolved after **30 minutes**, escalate to the secondary on-call engineer.
+3. If still unresolved after **1 hour**, escalate to the engineering manager.
+4. For suspected security incidents, notify the security team immediately.

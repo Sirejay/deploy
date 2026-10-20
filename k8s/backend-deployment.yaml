@@ -5,7 +5,9 @@ metadata:
   labels:
     app: backend
 spec:
-  replicas: 2
+  # Replicas are intentionally omitted here because HorizontalPodAutoscaler/backend
+  # manages the replica count (2-10). Setting replicas on the Deployment would
+  # reset HPA scaling on every apply.
   selector:
     matchLabels:
       app: backend
@@ -19,6 +21,10 @@ spec:
       labels:
         app: backend
     spec:
+      serviceAccountName: backend
+      automountServiceAccountToken: false
+      # Give Node enough time to drain connections and exit gracefully on SIGTERM.
+      terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -37,8 +43,12 @@ spec:
                 name: backend-secret
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: "100m"
@@ -59,13 +69,35 @@ spec:
                 name: backend-config
             - secretRef:
                 name: backend-secret
+          env:
+            # Connection pooling: route through Supabase's pooler (port 6543)
+            # or a PgBouncer sidecar/service. DATABASE_URL should point at the
+            # pooler, not the direct Postgres port (5432).
+            # Per-replica pool size is capped so that
+            #   maxReplicas (10) * DB_POOL_MAX (5) = 50
+            # stays within Postgres/Supabase connection limits.
+            - name: DB_POOL_MAX
+              value: "5"
+            - name: DB_POOL_IDLE_TIMEOUT_MS
+              value: "10000"
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
           livenessProbe:
             httpGet:
-              path: /health
+              path: /health/live
               port: http
             initialDelaySeconds: 15
             periodSeconds: 20
@@ -73,7 +105,7 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health
+              path: /health/ready
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -86,3 +118,6 @@ spec:
             limits:
               cpu: "1000m"
               memory: "512Mi"
+      volumes:
+        - name: tmp
+          emptyDir: {}

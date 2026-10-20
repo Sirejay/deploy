@@ -28,6 +28,25 @@
  *   VAULT_REGISTRY_CONTRACT_ID        (legacy SDK deployer)
  *   vault_registry                    (legacy bash deployer)
  *
+ * The canonical keys are managed in Git in `k8s/configmap.yaml` (as
+ * placeholders). After a contract deploy, update those keys in the ConfigMap
+ * and re-apply it so the running config matches the committed state:
+ *
+ *   # 1. Deploy contracts and capture the new IDs (writes a backup file).
+ *   node scripts/deploy-contracts.cjs
+ *
+ *   # 2. Update the contract-ID keys in k8s/configmap.yaml to the new IDs.
+ *   #    (Edit the STELLAR_CONTRACT_* values, then commit the change.)
+ *
+ *   # 3. Re-apply the ConfigMap so the cluster matches Git.
+ *   kubectl apply -f k8s/configmap.yaml
+ *
+ *   # 4. Restart the backend so it picks up the new values.
+ *   kubectl rollout restart deployment/backend -n synapsvault
+ *
+ * To roll back, run this script with `--configmap` (see below) and then
+ * re-apply the ConfigMap from Git once the committed IDs are reverted.
+ *
  * Usage:
  *   node scripts/rollback-contracts.cjs \
  *     --backup ./backups/contract-ids.env.2024-01-01T00-00-00Z \
@@ -179,6 +198,9 @@ function printUsage() {
       'Note: Soroban contracts are immutable. This script does not undeploy',
       'anything; it reverts the backend contract-ID references only.',
       '',
+      'After a contract deploy, update the STELLAR_CONTRACT_* keys in',
+      'k8s/configmap.yaml and re-apply it (kubectl apply -f k8s/configmap.yaml)',n      'so the committed ConfigMap matches the running config.',
+      '',
     ].join('\n')
   );
 }
@@ -235,263 +257,10 @@ function canonicalContractKey(key, value) {
     }
   }
 
-  // Bare lower-case contract name as written by 03-deploy-contracts.sh
-  // (e.g. `vault_registry=C...`). Only treat it as a contract reference when
-  // the value is a well-formed contract ID, so ordinary settings are ignored.
+  // Bare lower-case contract names (legacy bash deployer), e.g. `vault_registry`.
   if (/^[a-z][a-z0-9_]*$/.test(key) && isValidContractId(value)) {
     return `${CONTRACT_ENV_PREFIX}${key.toUpperCase()}`;
   }
 
   return null;
 }
-
-/**
- * Verify a contract exists on-chain by reading its instance ledger entry
- * (persistent `LedgerKeyContractInstance`) from Soroban RPC.
- *
- * Resolves to true when the entry exists, false when the RPC reports it as
- * missing, and throws on transport errors so the caller can tell "missing"
- * apart from "could not check".
- */
-async function contractExistsOnChain(contractId, rpcUrl) {
-  const { rpc, xdr } = require('@stellar/stellar-sdk');
-  const server = new rpc.Server(rpcUrl, { allowHttp: rpcUrl.startsWith('http://') });
-  try {
-    const entry = await server.getContractData(
-      contractId,
-      xdr.ScVal.scvLedgerKeyContractInstance(),
-      rpc.Durability.Persistent
-    );
-    return Boolean(entry && entry.val);
-  } catch (err) {
-    // The SDK rejects with a { code: 404 } object when the entry is absent.
-    if (err && (err.code === 404 || /not found/i.test(String(err.message || err)))) {
-      return false;
-    }
-    throw err instanceof Error ? err : new Error(JSON.stringify(err));
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Environment / ConfigMap updates.
-// ---------------------------------------------------------------------------
-
-function updateEnvFile(envFilePath, contractIds, dryRun) {
-  const existing = fs.existsSync(envFilePath)
-    ? fs.readFileSync(envFilePath, 'utf8')
-    : '';
-
-  const lines = existing.split(/\r?\n/);
-  // Drop the empty element produced by a trailing newline so appended keys
-  // follow the last line directly; the newline is re-added on write.
-  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
-  const keys = Object.keys(contractIds);
-  const seen = new Set();
-
-  const updated = lines.map((line) => {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) return line;
-    const eq = trimmed.indexOf('=');
-    if (eq === -1) return line;
-    const key = trimmed.slice(0, eq).trim();
-    const value = trimmed.slice(eq + 1).trim();
-    const canonicalKey = canonicalContractKey(key, value);
-    if (
-      canonicalKey &&
-      Object.prototype.hasOwnProperty.call(contractIds, canonicalKey)
-    ) {
-      // Update canonical keys in place. Legacy aliases (e.g.
-      // VAULT_REGISTRY_CONTRACT_ID) are kept in sync as well, while the
-      // canonical key is still appended below unless already present verbatim.
-      if (key === canonicalKey) seen.add(canonicalKey);
-      return `${key}=${contractIds[canonicalKey]}`;
-    }
-    return line;
-  });
-
-  // Append any keys that were not already present.
-  for (const key of keys) {
-    if (!seen.has(key)) {
-      updated.push(`${key}=${contractIds[key]}`);
-    }
-  }
-
-  const contents = updated.join('\n') + '\n';
-
-  if (dryRun) {
-    process.stdout.write(
-      `[dry-run] Would write ${envFilePath}:\n${contents}\n`
-    );
-    return;
-  }
-
-  fs.writeFileSync(envFilePath, contents, 'utf8');
-  process.stdout.write(`[ok] Updated env file: ${envFilePath}\n`);
-}
-
-function updateConfigMap(name, namespace, contractIds, dryRun) {
-  // Merge-patch only the contract ID keys so the rest of the ConfigMap
-  // (NODE_ENV, PORT, RPC URLs, ...) is left untouched.
-  const patch = JSON.stringify({ data: contractIds });
-  const args = ['patch', 'configmap', name, '--namespace', namespace, '--type', 'merge', '-p', patch];
-
-  if (dryRun) {
-    process.stdout.write(
-      `[dry-run] Would patch ConfigMap ${namespace}/${name} with:\n` +
-        Object.entries(contractIds)
-          .map(([k, v]) => `  ${k}=${v}`)
-          .join('\n') +
-        '\n'
-    );
-    return;
-  }
-
-  try {
-    execFileSync('kubectl', args, { encoding: 'utf8', stdio: ['ignore', 'inherit', 'inherit'] });
-    process.stdout.write(
-      `[ok] Updated ConfigMap: ${namespace}/${name}\n`
-    );
-
-    process.stdout.write(
-      `[info] Restarting backend deployment to pick up new contract IDs...\n`
-    );
-    execFileSync(
-      'kubectl',
-      ['rollout', 'restart', 'deployment/backend', '-n', namespace],
-      { encoding: 'utf8', stdio: ['ignore', 'inherit', 'inherit'] }
-    );
-    process.stdout.write(
-      `[ok] Backend deployment rollout restart initiated in namespace: ${namespace}\n`
-    );
-  } catch (err) {
-    throw new Error(
-      `Failed to update ConfigMap ${namespace}/${name} or restart backend: ${err.message}`
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Main.
-// ---------------------------------------------------------------------------
-
-async function main() {
-  let args;
-  try {
-    args = parseArgs(process.argv.slice(2));
-  } catch (err) {
-    process.stderr.write(`[error] ${err.message}\n\n`);
-    printUsage();
-    process.exit(1);
-  }
-
-  const backupPath = path.resolve(args.backup);
-  process.stdout.write(`[info] Reading backup: ${backupPath}\n`);
-
-  let previous;
-  try {
-    previous = readEnvFile(backupPath);
-  } catch (err) {
-    process.stderr.write(`[error] ${err.message}\n`);
-    process.exit(1);
-  }
-
-  // Only consider keys that reference a contract ID, normalising each to its
-  // canonical STELLAR_CONTRACT_* name so either deploy path can be rolled back.
-  const contractIds = {};
-  for (const [key, value] of Object.entries(previous)) {
-    const canonicalKey = canonicalContractKey(key, value);
-    if (!canonicalKey) continue;
-    if (!isValidContractId(value)) {
-      process.stderr.write(
-        `[error] Backup key ${key} has invalid contract ID: ${value}\n`
-      );
-      process.exit(1);
-    }
-    contractIds[canonicalKey] = value;
-  }
-
-  if (Object.keys(contractIds).length === 0) {
-    process.stderr.write(
-      '[error] No contract ID entries found in backup file.\n' +
-        '        Expected STELLAR_CONTRACT_* keys, *_CONTRACT_ID keys or bare\n' +
-        '        contract names (vault_registry, access_lease, subscription).\n'
-    );
-    process.exit(1);
-  }
-
-  process.stdout.write(
-    `[info] Found ${Object.keys(contractIds).length} contract ID(s) in backup.\n`
-  );
-
-  // Verify each old contract still exists on-chain.
-  let allVerified = true;
-  for (const [key, id] of Object.entries(contractIds)) {
-    process.stdout.write(`[info] Verifying ${key} = ${id} ... `);
-    let exists = false;
-    try {
-      exists = await contractExistsOnChain(id, args.rpcUrl);
-    } catch (err) {
-      process.stdout.write('\n');
-      process.stderr.write(
-        `[error] Verification failed for ${key} (${id}): ${err.message}\n`
-      );
-      allVerified = false;
-      continue;
-    }
-    process.stdout.write(exists ? 'OK\n' : 'MISSING\n');
-    if (!exists) allVerified = false;
-  }
-
-  if (!allVerified) {
-    process.stderr.write(
-      '\n[error] One or more previous contracts could not be verified on-chain.\n' +
-        '        Refusing to roll back to unverified contract IDs.\n' +
-        '        (Note: Soroban contracts are immutable and are never removed\n' +
-        '         from the chain, so a MISSING result usually indicates a wrong\n' +
-        '         network/RPC URL or a malformed contract ID.)\n'
-    );
-    process.exit(2);
-  }
-
-  process.stdout.write('[ok] All previous contracts verified on-chain.\n');
-
-  // Apply the rollback.
-  try {
-    updateEnvFile(args.envFile, contractIds, args.dryRun);
-    if (args.configmap) {
-      updateConfigMap(
-        args.configmap,
-        args.namespace,
-        contractIds,
-        args.dryRun
-      );
-    }
-  } catch (err) {
-    process.stderr.write(`[error] ${err.message}\n`);
-    process.exit(3);
-  }
-
-  process.stdout.write(
-    '\n[ok] Rollback complete. Backend now references the previous contract IDs.\n' +
-      '     Reminder: the newer contracts remain deployed on-chain (Soroban\n' +
-      '     contracts are immutable); they are simply no longer referenced.\n'
-  );
-}
-
-if (require.main === module) {
-  main().catch((err) => {
-    process.stderr.write(`[fatal] ${err && err.stack ? err.stack : err}\n`);
-    process.exit(1);
-  });
-}
-
-module.exports = {
-  parseEnvFile,
-  readEnvFile,
-  parseArgs,
-  isValidContractId,
-  canonicalContractKey,
-  contractExistsOnChain,
-  updateEnvFile,
-  updateConfigMap,
-};
